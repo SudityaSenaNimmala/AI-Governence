@@ -5,8 +5,8 @@
 // complexity.js's source, not hand-copied — see model-router-config.js's own
 // header for why. These tests exist to catch the day that extraction
 // silently breaks (a category renamed, a declaration reshaped) or the day
-// the hand-ported TIER_KEYWORD_RULES/TIER_UI_NAMES tables drift from the
-// real detectModelInfo()/TIER_UI_NAME they mirror.
+// the hand-ported TIER_KEYWORD_RULES table drifts from the
+// real detectModelInfo() it mirrors.
 //
 // Everything here runs the SHIPPED browser-extension source via the same
 // loaders browser-extension/tests already uses, per this repo's established
@@ -22,12 +22,12 @@ import { buildModelRouterConfig, detectModelInfoFromConfig } from '../src/os_mon
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EXT_TESTS_DIR = join(__dirname, '..', '..', 'browser-extension', 'tests');
 
-const { loadDetectModelInfo, tierUiNameFor } = await import(pathToFileURL(join(EXT_TESTS_DIR, 'load-model-router.mjs')));
+const { loadDetectModelInfo } = await import(pathToFileURL(join(EXT_TESTS_DIR, 'load-model-router.mjs')));
 const { loadComplexity } = await import(pathToFileURL(join(EXT_TESTS_DIR, 'load-complexity.mjs')));
 
 const POSITIVE_NAMES = [
   'REASONING_DEPTH', 'TASK_COMPLEXITY', 'DOMAIN_EXPERTISE', 'PLANNING',
-  'CODING', 'DEBUGGING', 'ANALYSIS', 'OUTPUT_COMPLEXITY', 'SHALLOW_TASK',
+  'CODING', 'DEBUGGING', 'ANALYSIS', 'OUTPUT_COMPLEXITY', 'RESEARCH_DEPTH', 'SHALLOW_TASK',
 ];
 const NEGATIVE_NAMES = ['TRIVIAL_INTENT', 'SIMPLE_TASK', 'SIMPLICITY_REQUEST'];
 
@@ -111,17 +111,47 @@ test('detectModelInfoFromConfig returns null for text matching no provider, same
   }
 });
 
-test('TIER_UI_NAMES matches the shipped TIER_UI_NAME table for every provider', () => {
+// The hand-ported TIER_UI_NAMES table is gone: the enforcer's click labels come
+// from shared/model-catalog.json (cfg.catalog) through its decideRoute port, and
+// that table still carried Gemini's retired 'Flash / Thinking / Pro'. Hold the
+// catalog to the property that table was tested for — every label the enforcer
+// can click on a surface reads back as its OWN tier through the catalog's label
+// matcher (the one the C# port runs) — and the keyword chain, which remains
+// only as the fallback reader, to never contradict the catalog on those labels.
+test('every catalog click label reads back as its own tier on its own surface', async () => {
   const cfg = buildModelRouterConfig();
-  for (const provider of ['anthropic', 'openai', 'google']) {
-    const real = tierUiNameFor(provider);
-    const ported = cfg.tierUiNames[provider];
-    assert.deepEqual(
-      Object.fromEntries(Object.entries(ported).map(([k, v]) => [Number(k), v])),
-      real,
-      `TIER_UI_NAMES.${provider} drifted from content.js's TIER_UI_NAME`,
-    );
+  const { resolveSurface, detectTierFromLabel } = await import(
+    pathToFileURL(join(__dirname, '..', '..', 'shared', 'decide-route.js')).href);
+  const surfaces = [
+    ...Object.keys(cfg.catalog.hosts).filter((h) => !cfg.catalog.hosts[h].alias_of).map((h) => ['browser', h]),
+    ...Object.keys(cfg.catalog.apps).map((a) => ['desktop_app', a]),
+  ];
+  for (const [surface, key] of surfaces) {
+    const entry = resolveSurface(cfg.catalog, surface, key, null, null);
+    for (const [tier, te] of Object.entries(entry.tiers)) {
+      for (const label of te.click_labels) {
+        assert.equal(detectTierFromLabel(entry, label), tier, `${key}: '${label}' must read as ${tier}`);
+        const chain = detectModelInfoFromConfig(label);
+        if (chain && chain.provider === entry.provider && entry.provider !== 'google') {
+          assert.equal(chain.tier, tier, `${key}: the fallback keyword chain contradicts the catalog on '${label}'`);
+        }
+      }
+    }
   }
+  // Gemini specifically: the measured lineup, not the retired one.
+  const gem = resolveSurface(cfg.catalog, 'browser', 'gemini.google.com', null, null);
+  assert.equal(detectTierFromLabel(gem, 'Open mode picker, currently Flash'), 'standard');
+  assert.equal(detectTierFromLabel(gem, 'Open mode picker, currently Flash-Lite'), 'economy');
+  assert.equal(detectTierFromLabel(gem, 'Open mode picker, currently Pro'), 'premium');
+});
+
+test('RESEARCH_DEPTH (classifier 1.3.0) is extracted with its structural signal', () => {
+  const cfg = buildModelRouterConfig();
+  const research = cfg.positiveCategories.find((c) => c.name === 'RESEARCH_DEPTH');
+  assert.ok(research, 'RESEARCH_DEPTH missing — the desktop scorer would diverge from the browser');
+  assert.ok(research.terms.some((t) => t.term === 'literature review*' && t.weight === 6));
+  assert.ok(research.structural.length > 0, 'RESEARCH_STRUCTURE must ride along');
+  for (const sig of research.structural) assert.doesNotThrow(() => new RegExp(sig.source, sig.flags));
 });
 
 test('buildModelRouterConfig output is JSON-serializable and within a sane env-var size budget', () => {
@@ -147,4 +177,37 @@ test('classify() sanity: the ported lexicon data, scored by hand for one known c
   const cfg = buildModelRouterConfig();
   const architect = cfg.positiveCategories.find((c) => c.name === 'TASK_COMPLEXITY').terms.find((t) => t.term === 'architect*');
   assert.equal(architect.weight, 6, 'ported weight must match what made the real classifier call this complex');
+});
+
+// Classifier 1.4.0: steps 3b (pure arithmetic) and 3c (small talk) reach the
+// desktop enforcer as DATA. 3b had never been ported to C# at all, so "what is
+// 2+2" was simple in the browser and moderate on the desktop.
+test('ARITHMETIC_SHAPE and SMALL_TALK are extracted for the C# scorer', () => {
+  const cfg = buildModelRouterConfig();
+  for (const key of ['wrapper', 'residue', 'hasOperator', 'digit']) {
+    const r = cfg.arithmetic?.[key];
+    assert.ok(r && typeof r.source === 'string', `arithmetic.${key} missing`);
+    assert.doesNotThrow(() => new RegExp(r.source, r.flags));
+  }
+  assert.equal(cfg.arithmetic.wrapper.flags, 'gi');
+  assert.ok(cfg.smallTalk.phrases.includes('good morning'));
+  assert.ok(cfg.smallTalk.phrases.includes('how are you'));
+  assert.ok(cfg.smallTalk.filler.includes('there'));
+  assert.ok(!cfg.smallTalk.phrases.includes('there'), 'filler must never be a small-talk phrase on its own');
+});
+
+// THE LIVE BUG. The packaged agent ships resources/agent/ with no
+// resources/browser-extension/ beside it, so reading only the canonical source
+// fell back to a config with ZERO categories and the enforcer called "hi"
+// 'moderate'. The agent's own generated copy must yield the identical lexicon.
+test('without browser-extension/ the agent copy yields the same lexicon', async () => {
+  const { buildLexiconConfig, _paths } = await import('../src/os_monitor/model-router-config.js');
+  const canonical = buildLexiconConfig();
+  const agentOnly = buildLexiconConfig([_paths.AGENT_COMPLEXITY_JS_PATH]);
+  assert.equal(canonical.lexiconSource, 'canonical');
+  assert.equal(agentOnly.lexiconSource, 'agent_copy');
+  assert.deepEqual({ ...agentOnly, lexiconSource: null }, { ...canonical, lexiconSource: null });
+  const none = buildLexiconConfig(['C:/definitely/not/here/complexity.js']);
+  assert.equal(none.lexiconSource, 'none');
+  assert.deepEqual(none.positiveCategories, []);
 });

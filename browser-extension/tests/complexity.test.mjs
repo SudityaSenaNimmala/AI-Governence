@@ -60,7 +60,11 @@ test('content.js only ever asks the module for a verdict — no lexicon of its o
   assert.ok(at > 0, 'classifyComplexity is still the router\'s entry point');
   const body = src.slice(at, src.indexOf('\n  }', at));
   assert.doesNotMatch(body, /\.length/, 'the router must not reintroduce a length heuristic');
-  assert.match(body, /'moderate'/, 'a missing module must fall back to moderate, not simple');
+  // Routing goes BOTH ways now, so 'moderate' is no longer a no-op verdict: on a
+  // premium model it routes DOWN to standard. A missing module must fall back to
+  // 'unknown', which matches no rule and no built-in tier (decideRoute -> noop).
+  assert.match(body, /return 'unknown'/, 'a missing module must fall back to unknown, not to a routable verdict');
+  assert.doesNotMatch(body, /return 'simple'|return 'moderate'/, 'a missing module must never produce a routable verdict');
 });
 
 // ── the acceptance table ────────────────────────────────────────────────────
@@ -386,18 +390,16 @@ test('property: 100KB of prompt classifies in well under a frame', () => {
 
 // ── contract with the router ────────────────────────────────────────────────
 
-test('contract: every verdict is a key smartRoute\'s ROUTE_TABLE actually indexes', () => {
-  const src = readFileSync(path.join(root, 'content', 'content.js'), 'utf8');
-  const at = src.indexOf('const ROUTE_TABLE = {');
-  assert.ok(at > 0, 'ROUTE_TABLE not found in content.js');
-  const region = src.slice(at, src.indexOf('\n  };', at));
-  const keys = new Set(
-    [...region.matchAll(/^\s+(\w+):\s*(?:\{\s*uiName|null,)/gm)].map((m) => m[1]),
-  );
-
+test('contract: every verdict is a key the shared decideRoute built-in table indexes', async () => {
+  // ROUTE_TABLE is gone; the tier table is COMPLEXITY_TIER in shared/decide-route.js,
+  // shared by every routing engine. An unrecognised verdict there means the
+  // built-in table has no target and the router silently stops routing.
+  const { pathToFileURL } = await import('node:url');
+  const shared = await import(pathToFileURL(path.join(root, '..', 'shared', 'decide-route.js')).href);
+  const keys = new Set(Object.keys(shared.COMPLEXITY_TIER));
   assert.deepEqual([...keys].sort(), [...TIERS].sort(),
-    'ROUTE_TABLE\'s complexity keys and the classifier\'s tiers have drifted apart — ' +
-    'an unrecognised tier makes smartRoute silently return null and stop routing');
+    'COMPLEXITY_TIER keys and the classifier tiers have drifted apart');
+  assert.deepEqual(Object.keys(shared.COMPLEXITY_EFFORT).sort(), [...TIERS].sort());
 
   // And the classifier really only ever produces those keys.
   const corpus = [
@@ -458,4 +460,149 @@ test('an unmatched prompt still falls back to moderate, never simple', () => {
   // The fallback this whole fix works around must stay intact: scoring zero
   // means "no opinion", and no opinion must not silently downgrade the model.
   assert.equal(classify('zxqv wobble frimble'), 'moderate');
+});
+
+// ── Research / reasoning depth (classifier 1.3.0) ───────────────────────────
+//
+// Routing now goes BOTH ways by how demanding a prompt is, so a research-style
+// ask has to reach 'complex' (premium) on its own merits. Before researchDepth
+// most of these matched nothing and fell to the no-opinion 'moderate'.
+
+const RESEARCH_VERDICTS = [
+  // research deliverables — one phrase is enough (weight 6)
+  ['Write a literature review on transformer models', 'complex'],
+  ['Do a systematic review of remote-work productivity studies', 'complex'],
+  ['Run a meta-analysis of these trial results', 'complex'],
+  ['deep research: EU battery regulation', 'complex'],
+  // research + sources / evidence — two distinct signals
+  ['research the regulatory history of GDPR fines and cite sources', 'complex'],
+  ['Investigate why churn increased and weigh the evidence', 'complex'],
+  ['Compare these three sources and evaluate the evidence for each claim', 'complex'],
+  // proofs and multi-step reasoning
+  ['Prove that the square root of 2 is irrational', 'complex'],
+  ['State and prove the theorem, then give a counterargument', 'complex'],
+  ['Plan a multi-step rollout', 'complex'],
+  // a numbered multi-part brief is the shape of research, whatever its length
+  ['1. what changed\n2. why it matters\n3. what we should do next', 'complex'],
+  // ...and what must NOT be swept up
+  ['proofread this paragraph', 'moderate'],
+  ['Research the history of the printing press', 'moderate'],
+  ['I am a researcher, write a haiku', 'moderate'],
+  ['what is the capital of France?', 'moderate'],
+  ['briefly, what is a hypothesis?', 'simple'],
+];
+
+for (const [prompt, expected] of RESEARCH_VERDICTS) {
+  test(`researchDepth: ${JSON.stringify(prompt)} -> ${expected}`, () => {
+    assert.equal(classify(prompt), expected);
+  });
+}
+
+test('researchDepth: repeating a research prompt never changes its tier', () => {
+  for (const [prompt] of RESEARCH_VERDICTS) {
+    assert.equal(classify(repeated(prompt)), classify(prompt), `repetition moved ${JSON.stringify(prompt)}`);
+  }
+});
+
+test('researchDepth: there is no question-mark COUNT signal (it would be a repetition count)', () => {
+  const q = 'what is the capital of France?';
+  assert.equal(classify([q, q, q, q].join(' ')), classify(q));
+});
+
+test('researchDepth: the enumerated-parts signal is shape, not length', () => {
+  const longOneLine = 'what changed and why it matters and what we should do next. '.repeat(40);
+  assert.equal(classify(longOneLine), 'moderate', 'a long single paragraph is not a multi-part brief');
+  assert.equal(classify('1. a\n2. b\n3. c'), 'moderate', 'three bare parts carry one structural signal (3), not complex alone');
+});
+
+test('researchDepth is wired into the positive categories and the version moved', () => {
+  const src = readFileSync(path.join(root, 'content', 'complexity.js'), 'utf8');
+  assert.match(src, /compileCategory\('researchDepth', RESEARCH_DEPTH, RESEARCH_STRUCTURE\)/);
+  assert.match(String(VERSION), /^1\.([3-9]|\d{2,})\.\d+$/);
+  // `proof*` would eat "proofread" — the spelled-out form is deliberate.
+  assert.doesNotMatch(src, /\['proof\*'/);
+});
+
+// ── Small talk (classifier 1.4.0) ───────────────────────────────────────────
+//
+// "good morning", "hello there", "how are you" came out 'moderate' in 1.3.0:
+// "good"/"morning"/"there" are not greeting TOKENS, so the step-3 fast path
+// refused them, nothing in the lexicon scored them, and they fell to the
+// no-opinion fallback — so on a premium model they routed only down to standard.
+// Step 3c is a SHAPE test: strip small-talk phrases and filler, is any word left?
+
+const { classifyDetailed } = loadComplexity();
+
+test('small talk on its own is simple', () => {
+  for (const p of [
+    'good morning', 'Good morning!', 'good afternoon', 'good evening', 'good night',
+    'hello there', 'hey there', 'hey team', 'how are you', 'how are you doing today?',
+    "what's up", 'thank you so much', 'thanks a lot!', 'see you later', 'nice to meet you',
+    'great job, thanks claude', 'no worries', 'sounds good 👍', 'cheers mate',
+  ]) {
+    assert.equal(classify(p), 'simple', `${JSON.stringify(p)} should be simple`);
+  }
+});
+
+test('small talk wrapped around a real ask is judged on the ask', () => {
+  // The reported requirement: a greeting must never make a real task cheap.
+  assert.equal(classify('hi, please do deep research on EU AI regulation'), 'complex');
+  assert.equal(classify('good morning, can you design a distributed cache?'), 'complex');
+  for (const p of [
+    'thanks, now explain how kubernetes networking works',
+    'hello! write a python function to parse CSV',
+    'good morning, what is the capital of France?',
+    'sorry, that is wrong',
+  ]) {
+    assert.notEqual(classify(p), 'simple', `${JSON.stringify(p)} must not be simple`);
+  }
+});
+
+test('filler alone is not small talk — a real small-talk phrase must be present', () => {
+  for (const p of ['there', 'team', 'today', 'please', 'claude']) {
+    assert.notEqual(classifyDetailed(p).rule, 'small_talk', `${JSON.stringify(p)} took the small-talk path`);
+  }
+});
+
+test('small talk is decided by step 3c, before scoring', () => {
+  assert.deepEqual(classifyDetailed('good morning'), { verdict: 'simple', rule: 'small_talk', score: null });
+  assert.deepEqual(classifyDetailed('hi'), { verdict: 'simple', rule: 'greeting', score: null });
+  assert.deepEqual(classifyDetailed('what is 2+2'), { verdict: 'simple', rule: 'arithmetic', score: null });
+  assert.equal(classifyDetailed('architecture').rule, 'score');
+  assert.equal(classifyDetailed('architecture').score, 6);
+});
+
+test('repeating small talk never changes its tier', () => {
+  for (const p of ['good morning', 'how are you', 'thank you so much']) {
+    assert.equal(classify(repeated(p)), classify(p));
+  }
+});
+
+test('classifyDetailed agrees with classify and is total', () => {
+  for (const p of [...VERDICTS.map(([x]) => x), null, undefined, 42, '', 'good morning']) {
+    const d = classifyDetailed(p);
+    assert.equal(d.verdict, classify(p));
+    assert.ok(typeof d.rule === 'string');
+    assert.ok(d.score === null || Number.isInteger(d.score));
+  }
+});
+
+test('VERSION is 1.4.0 (small talk + ARITHMETIC_SHAPE)', () => {
+  assert.equal(VERSION, '1.4.0');
+  const src = readFileSync(path.join(root, 'content', 'complexity.js'), 'utf8');
+  assert.match(src, /const ARITHMETIC_SHAPE = \{/);
+  assert.match(src, /const SMALL_TALK = \[/);
+  assert.match(src, /const SMALL_TALK_FILLER = \[/);
+});
+
+// The shared corpus (shared/complexity-corpus.json) is what the desktop
+// enforcer's C# port is held in lockstep against (agent/tests/complexity-
+// lockstep.test.mjs). Its pinned expectations are product behaviour.
+test('shared corpus: every pinned expectation holds', () => {
+  const corpus = JSON.parse(readFileSync(path.join(root, '..', 'shared', 'complexity-corpus.json'), 'utf8'));
+  assert.ok(corpus.cases.length >= 60);
+  for (const c of corpus.cases) {
+    if (!c.expect) continue;
+    assert.equal(classify(c.text), c.expect, `${c.id} ${JSON.stringify(c.text.slice(0, 60))}`);
+  }
 });

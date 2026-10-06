@@ -1,73 +1,181 @@
-// Intelligent Model Routing — rules CRUD, endpoint registry, decision API, analytics.
+// Intelligent Model Routing — rules (schema v2, lib/routing-schema.js), catalog
+// overrides, settings, the machine-facing policy document, and analytics.
 //
-// The proxy agent fetches rules via GET /rules, caches them locally, and
-// evaluates routing decisions in <5ms without calling the server per-request.
-// Routing events are reported asynchronously through the DLP reporter pipeline.
-// The POST /decide endpoint exists for the browser extension and testing.
+// HOW CLIENTS GET POLICY. The browser extension and desktop agent poll
+// GET /api/v1/routing/policy (machine token, ETag → 304) and evaluate routing
+// locally; the server is never asked per prompt. What they DID is reported back
+// as `model_routed` events through POST /api/v1/dlp, and the analytics below
+// read those events — they are the only real record of routing.
+//
+// AUTH. Writes go through requireReviewAuth: there is no admin sign-in yet, so
+// it is open by default and closed with ADMIN_AUTH_OPEN=false — the same gate as
+// the access-request queue. Reads the dashboard needs stay open, as they were.
+//
+// REMOVED: POST /routing/decide (no callers; it evaluated v1 rules server-side)
+// and POST /routing/log (no callers; it wrote routing_log, which analytics no
+// longer reads).
 
 import crypto from 'node:crypto';
 import { a } from '../util.js';
+import { requireMachineAuth, requireReviewAuth } from '../auth.js';
+import { resolveFeatures } from './feature-settings.js';
+import {
+  SCHEMA_VERSION, RULE_SURFACES, DEFAULT_SETTINGS,
+  normalizeRuleInput, normalizeCatalogOverride, normalizeSettings,
+  toLegacyView, policyVersion,
+} from '../lib/routing-schema.js';
 import {
   RESPONSE_BUDGET_MS, raceWithFallback, applyBudgetHeaders, registerResponseWarmer,
 } from '../lib/response-budget.js';
 
 const LOG_ROUTE = 'routing.log';
 const ANALYTICS_ROUTE = 'routing.analytics';
+const SETTINGS_ID = 'default';
 
 export function mountRouting(app, db) {
-  const rules    = () => db.collection('routing_rules');
+  const rules     = () => db.collection('routing_rules');
   const endpoints = () => db.collection('routing_endpoints');
-  const log      = () => db.collection('routing_log');
+  const overrides = () => db.collection('routing_catalog_overrides');
+  const settingsC = () => db.collection('routing_settings');
 
-  // ── Rules CRUD ──────────────────────────────────────────────────────
+  const readSettings = async () => {
+    const doc = await settingsC().findOne({ id: SETTINGS_ID });
+    const out = { ...DEFAULT_SETTINGS };
+    for (const k of Object.keys(DEFAULT_SETTINGS)) if (typeof doc?.[k] === 'boolean') out[k] = doc[k];
+    return out;
+  };
+  const readOverrides = () => overrides()
+    .find({}).sort({ provider: 1 }).project({ _id: 0 }).toArray();
 
-  app.get('/api/v1/routing/rules', a(async (req, res) => {
-    const rows = await rules()
-      .find({}).sort({ priority: 1 }).project({ _id: 0 }).toArray();
-    res.json(rows);
+  // ── Policy (machine-facing) ─────────────────────────────────────────────
+
+  // The one document a client needs. Enabled rules only, sorted by priority;
+  // ?surface=browser|desktop_app|api_proxy trims to rules scoped to it. The
+  // version is a content hash of the returned payload, sent as a strong ETag.
+  app.get('/api/v1/routing/policy', requireMachineAuth, a(async (req, res) => {
+    const surface = req.query.surface ? String(req.query.surface) : null;
+    if (surface && !RULE_SURFACES.includes(surface)) {
+      return res.status(400).json({ error: `unknown surface: ${surface}` });
+    }
+    const [ruleRows, overrideRows, settings, features] = await Promise.all([
+      rules().find({ enabled: true }).sort({ priority: 1 }).project({ _id: 0 }).toArray(),
+      readOverrides(),
+      readSettings(),
+      resolveFeatures(db),
+    ]);
+
+    const policyRules = ruleRows
+      .filter((r) => r.schema_version === SCHEMA_VERSION)
+      .filter((r) => !surface || (r.scope?.surfaces || RULE_SURFACES).includes(surface))
+      .map(policyRule);
+    const catalogOverrides = overrideRows.map(({ provider, host_or_app, tier, label }) =>
+      ({ provider, host_or_app, tier, label }));
+    const fleetEnabled = features.features?.model_routing?.status !== 'disabled';
+
+    const body = {
+      schema_version: SCHEMA_VERSION,
+      rules: policyRules,
+      catalog_overrides: catalogOverrides,
+      settings,
+      fleet_enabled: fleetEnabled,
+    };
+    const version = policyVersion(body);
+    const etag = `"${version}"`;
+    res.set('ETag', etag);
+    res.set('Cache-Control', 'no-cache');
+    const inm = String(req.headers['if-none-match'] || '');
+    if (inm && inm.split(',').map((s) => s.trim().replace(/^W\//, '')).includes(etag)) {
+      return res.status(304).end();
+    }
+    res.json({ version, ...body, generated_at: new Date().toISOString() });
   }));
 
-  app.post('/api/v1/routing/rules', a(async (req, res) => {
-    const { name, enabled = true, priority = 50, conditions, action } = req.body ?? {};
-    if (!name || !conditions || !action) {
-      return res.status(400).json({ error: 'name, conditions, and action are required' });
-    }
-    if (!action.model && !action.endpoint_id) {
-      return res.status(400).json({ error: 'action must specify model or endpoint_id' });
-    }
-    const rule = {
-      id: crypto.randomUUID(),
-      name,
-      enabled: !!enabled,
-      priority: Number(priority) || 50,
-      conditions,
-      action,
-      created_at: new Date(),
-      updated_at: new Date(),
-    };
+  // ── Rules ───────────────────────────────────────────────────────────────
+
+  // LEGACY READ, kept for one release: clients that predate the policy endpoint
+  // poll this unauthenticated and act on action.ui_name / action.model, so v2
+  // rules are projected back to that shape (toLegacyView — additive). The
+  // dashboard asks for the stored v2 documents with ?schema=2.
+  app.get('/api/v1/routing/rules', a(async (req, res) => {
+    const rows = await rules().find({}).sort({ priority: 1 }).project({ _id: 0 }).toArray();
+    if (String(req.query.schema || '') === String(SCHEMA_VERSION)) return res.json(rows);
+    const ovs = await readOverrides();
+    res.json(rows.map((r) => toLegacyView(r, ovs)));
+  }));
+
+  app.post('/api/v1/routing/rules', requireReviewAuth, a(async (req, res) => {
+    const { value, error } = normalizeRuleInput(req.body);
+    if (error) return res.status(400).json({ error });
+    const now = new Date();
+    const rule = { id: crypto.randomUUID(), ...value, created_at: now, updated_at: now };
     await rules().insertOne(rule);
     res.status(201).json({ ok: true, id: rule.id });
   }));
 
-  app.put('/api/v1/routing/rules/:id', a(async (req, res) => {
-    const { name, enabled, priority, conditions, action } = req.body ?? {};
-    const update = { updated_at: new Date() };
-    if (name !== undefined)       update.name       = name;
-    if (enabled !== undefined)    update.enabled    = !!enabled;
-    if (priority !== undefined)   update.priority   = Number(priority) || 50;
-    if (conditions !== undefined) update.conditions = conditions;
-    if (action !== undefined)     update.action     = action;
-    const result = await rules().updateOne({ id: req.params.id }, { $set: update });
-    if (result.matchedCount === 0) return res.status(404).json({ error: 'rule not found' });
+  app.put('/api/v1/routing/rules/:id', requireReviewAuth, a(async (req, res) => {
+    const { value, error } = normalizeRuleInput(req.body, { partial: true });
+    if (error) return res.status(400).json({ error });
+    const existing = await rules().findOne({ id: req.params.id });
+    if (!existing) return res.status(404).json({ error: 'rule not found' });
+    // A partial update to a rule still on v1 (the migration could not have run
+    // yet only on a server that failed to seed) must not stamp schema_version 2
+    // onto a v1 action. Only claim v2 when the stored action is v2-shaped.
+    const update = { ...value, updated_at: new Date() };
+    if (!value.action && !existing.action?.type) delete update.schema_version;
+    await rules().updateOne({ id: req.params.id }, { $set: update });
     res.json({ ok: true });
   }));
 
-  app.delete('/api/v1/routing/rules/:id', a(async (req, res) => {
+  app.delete('/api/v1/routing/rules/:id', requireReviewAuth, a(async (req, res) => {
     await rules().deleteOne({ id: req.params.id });
     res.json({ ok: true });
   }));
 
-  // ── Endpoints CRUD ──────────────────────────────────────────────────
+  // ── Catalog overrides (admin picker-label corrections) ──────────────────
+
+  app.get('/api/v1/routing/catalog-overrides', a(async (_req, res) => {
+    res.json(await readOverrides());
+  }));
+
+  // Upsert on (provider, host_or_app, tier): one label per slot.
+  app.put('/api/v1/routing/catalog-overrides', requireReviewAuth, a(async (req, res) => {
+    const { value, error } = normalizeCatalogOverride(req.body);
+    if (error) return res.status(400).json({ error });
+    const key = { provider: value.provider, host_or_app: value.host_or_app, tier: value.tier };
+    const existing = await overrides().findOne(key);
+    const now = new Date();
+    if (existing) {
+      await overrides().updateOne({ id: existing.id }, { $set: { label: value.label, updated_at: now } });
+      return res.json({ ok: true, id: existing.id });
+    }
+    const id = crypto.randomUUID();
+    await overrides().insertOne({ id, ...value, source: 'admin', created_at: now, updated_at: now });
+    res.status(201).json({ ok: true, id });
+  }));
+
+  app.delete('/api/v1/routing/catalog-overrides/:id', requireReviewAuth, a(async (req, res) => {
+    await overrides().deleteOne({ id: req.params.id });
+    res.json({ ok: true });
+  }));
+
+  // ── Settings ────────────────────────────────────────────────────────────
+
+  app.get('/api/v1/routing/settings', a(async (_req, res) => {
+    res.json(await readSettings());
+  }));
+
+  app.put('/api/v1/routing/settings', requireReviewAuth, a(async (req, res) => {
+    const { value, error } = normalizeSettings(req.body, await readSettings());
+    if (error) return res.status(400).json({ error });
+    await settingsC().updateOne(
+      { id: SETTINGS_ID },
+      { $set: { id: SETTINGS_ID, ...value, updated_at: new Date() } },
+      { upsert: true },
+    );
+    res.json(value);
+  }));
+
+  // ── Endpoints (api_proxy targets) ───────────────────────────────────────
 
   app.get('/api/v1/routing/endpoints', a(async (req, res) => {
     const rows = await endpoints()
@@ -75,7 +183,7 @@ export function mountRouting(app, db) {
     res.json(rows);
   }));
 
-  app.post('/api/v1/routing/endpoints', a(async (req, res) => {
+  app.post('/api/v1/routing/endpoints', requireReviewAuth, a(async (req, res) => {
     const { name, provider, host, models, region, pricing, enabled = true } = req.body ?? {};
     if (!name || !provider) {
       return res.status(400).json({ error: 'name and provider are required' });
@@ -97,7 +205,7 @@ export function mountRouting(app, db) {
     res.status(201).json({ ok: true, id: ep.id });
   }));
 
-  app.put('/api/v1/routing/endpoints/:id', a(async (req, res) => {
+  app.put('/api/v1/routing/endpoints/:id', requireReviewAuth, a(async (req, res) => {
     const { name, provider, host, models, region, pricing, enabled } = req.body ?? {};
     const update = { updated_at: new Date() };
     if (name !== undefined)     update.name     = name;
@@ -112,78 +220,18 @@ export function mountRouting(app, db) {
     res.json({ ok: true });
   }));
 
-  app.delete('/api/v1/routing/endpoints/:id', a(async (req, res) => {
+  app.delete('/api/v1/routing/endpoints/:id', requireReviewAuth, a(async (req, res) => {
     await endpoints().deleteOne({ id: req.params.id });
     res.json({ ok: true });
   }));
 
-  // ── Routing Decision (browser extension / testing) ──────────────────
+  // ── Routing log (dashboard read) ────────────────────────────────────────
 
-  app.post('/api/v1/routing/decide', a(async (req, res) => {
-    const { host, model, sensitivity, complexity, prompt_tokens, machine_id } = req.body ?? {};
-    const activeRules = await rules()
-      .find({ enabled: true }).sort({ priority: 1 }).project({ _id: 0 }).toArray();
-    const activeEndpoints = await endpoints()
-      .find({ enabled: true }).project({ _id: 0 }).toArray();
-
-    for (const rule of activeRules) {
-      if (matchesConditions(rule.conditions, { host, model, sensitivity, complexity, prompt_tokens, machine_id })) {
-        const resolved = resolveAction(rule.action, activeEndpoints, model);
-        if (resolved) {
-          await log().insertOne({
-            id: crypto.randomUUID(),
-            machine_id: machine_id || null,
-            timestamp: new Date(),
-            original_host: host || null,
-            original_model: model || null,
-            routed_model: resolved.model || model,
-            routed_host: resolved.host || null,
-            rule_id: rule.id,
-            rule_name: rule.name,
-            sensitivity: sensitivity || null,
-            complexity: complexity || null,
-            prompt_tokens_est: prompt_tokens || null,
-          });
-          return res.json({ routed: true, model: resolved.model, host: resolved.host, rule: rule.name });
-        }
-      }
-    }
-    res.json({ routed: false });
-  }));
-
-  // ── Routing Log Ingestion (from proxy reporter) ─────────────────────
-
-  app.post('/api/v1/routing/log', a(async (req, res) => {
-    const events = Array.isArray(req.body) ? req.body : [req.body];
-    if (events.length > 200) return res.status(400).json({ error: 'max 200 events per batch' });
-    const docs = events.map(e => ({
-      id: crypto.randomUUID(),
-      machine_id: e.machine_id || null,
-      timestamp: e.timestamp ? new Date(e.timestamp) : new Date(),
-      original_host: e.original_host || null,
-      original_model: e.original_model || null,
-      routed_model: e.routed_model || null,
-      routed_host: e.routed_host || null,
-      rule_id: e.rule_id || null,
-      rule_name: e.rule_name || null,
-      sensitivity: e.sensitivity || null,
-      complexity: e.complexity || null,
-      prompt_tokens_est: e.prompt_tokens_est || null,
-    }));
-    if (docs.length) await log().insertMany(docs);
-    res.json({ ok: true, count: docs.length });
-  }));
-
-  // ── Routing Log Query ───────────────────────────────────────────────
-
-  // Already bounded (limit <= 500) and already parallel, so this wrapper is
-  // cheap insurance rather than a fix: it stops a future change from quietly
-  // making this the one tab read with no ceiling on it.
   app.get('/api/v1/routing/log', a(async (req, res) => {
-    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
     const result = await raceWithFallback({
       route: LOG_ROUTE, params: { limit }, budgetMs: RESPONSE_BUDGET_MS,
-      live: () => fetchRoutingLog(db, log(), limit),
+      live: () => fetchRoutingLog(db, limit),
     });
     if (result.failed) throw result.error;
     applyBudgetHeaders(res, result);
@@ -192,19 +240,15 @@ export function mountRouting(app, db) {
 
   registerResponseWarmer(LOG_ROUTE, () => raceWithFallback({
     route: LOG_ROUTE, params: { limit: 100 }, budgetMs: RESPONSE_BUDGET_MS,
-    live: () => fetchRoutingLog(db, log(), 100),
+    live: () => fetchRoutingLog(db, 100),
   }));
 
-  // ── Analytics ───────────────────────────────────────────────────────
+  // ── Analytics ───────────────────────────────────────────────────────────
 
-  // Parallelized first (see fetchRoutingAnalytics) and then wrapped in the
-  // shared budget on the same "cheap insurance" grounds as /routing/log: it is
-  // one round trip's worth of wall time now, and the wrapper is what keeps it
-  // that way if a fourteenth read is ever added.
   app.get('/api/v1/routing/analytics', a(async (req, res) => {
     const result = await raceWithFallback({
       route: ANALYTICS_ROUTE, params: null, budgetMs: RESPONSE_BUDGET_MS,
-      live: () => fetchRoutingAnalytics(db, rules(), endpoints(), log()),
+      live: () => fetchRoutingAnalytics(db),
     });
     if (result.failed) throw result.error;
     applyBudgetHeaders(res, result);
@@ -213,195 +257,139 @@ export function mountRouting(app, db) {
 
   registerResponseWarmer(ANALYTICS_ROUTE, () => raceWithFallback({
     route: ANALYTICS_ROUTE, params: null, budgetMs: RESPONSE_BUDGET_MS,
-    live: () => fetchRoutingAnalytics(db, rules(), endpoints(), log()),
+    live: () => fetchRoutingAnalytics(db),
   }));
 }
 
-// The work behind GET /api/v1/routing/analytics.
-async function fetchRoutingAnalytics(db, rules, endpoints, log) {
-  {
-    // THIRTEEN INDEPENDENT READS, ISSUED AT ONCE.
-    //
-    // This route used to run eight countDocuments (four of them against
-    // dlp_events) and then five aggregations, each awaited before the next was
-    // sent — thirteen serialized round trips for a payload where NOTHING depends
-    // on anything else. The only arithmetic that looked like a dependency is
-    // pure JS: total_routed / last_24h / last_7d just add two counts each, so
-    // the counts go out together and the addition happens here. Same change, and
-    // the same reasoning, as /api/v1/overview and /api/v1/machines.
-    //
-    // The window bounds are also computed ONCE now, from a single `now`. They
-    // were derived from four separate Date.now() calls spread across the
-    // sequential awaits, so on a slow run the dlp_events 24h cutoff and the
-    // routing_log 24h cutoff were measurably different instants.
-    const now = Date.now();
-    const since24hIso = new Date(now - 86400000).toISOString();
-    const since7dIso  = new Date(now - 7 * 86400000).toISOString();
-    const since24h    = new Date(now - 86400000);
-    const since7d     = new Date(now - 7 * 86400000);
-    const since14d    = new Date(now - 14 * 86400000);
-
-    const [
-      dlpRouted, proxyRouted, dlp24h, dlp7d, proxy24h, proxy7d,
-      activeRules, totalEndpoints,
-      byModel, byRule, bySensitivity, byComplexity, dailyTrend,
-    ] = await Promise.all([
-      // Count from BOTH dlp_events (browser extension) and routing_log (proxy)
-      db.collection('dlp_events').countDocuments({ event_kind: 'model_routed' }),
-      log.countDocuments(),
-      db.collection('dlp_events').countDocuments({ event_kind: 'model_routed', occurred_at: { $gte: since24hIso } }),
-      db.collection('dlp_events').countDocuments({ event_kind: 'model_routed', occurred_at: { $gte: since7dIso } }),
-      log.countDocuments({ timestamp: { $gte: since24h } }),
-      log.countDocuments({ timestamp: { $gte: since7d } }),
-      rules.countDocuments({ enabled: true }),
-      endpoints.countDocuments({ enabled: true }),
-
-      log.aggregate([
-        { $group: { _id: { from: '$original_model', to: '$routed_model' }, count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-        { $limit: 20 },
-      ]).toArray(),
-
-      log.aggregate([
-        { $group: { _id: { id: '$rule_id', name: '$rule_name' }, count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-        { $limit: 20 },
-      ]).toArray(),
-
-      log.aggregate([
-        { $match: { sensitivity: { $ne: null } } },
-        { $group: { _id: '$sensitivity', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]).toArray(),
-
-      log.aggregate([
-        { $match: { complexity: { $ne: null } } },
-        { $group: { _id: '$complexity', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]).toArray(),
-
-      // Daily trend (last 14 days)
-      log.aggregate([
-        { $match: { timestamp: { $gte: since14d } } },
-        { $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp' } },
-          count: { $sum: 1 },
-        }},
-        { $sort: { _id: 1 } },
-      ]).toArray(),
-    ]);
-
-    const totalRouted = dlpRouted + proxyRouted;
-    const last24h = dlp24h + proxy24h;
-    const last7d = dlp7d + proxy7d;
-
-    return {
-      total_routed: totalRouted,
-      last_24h: last24h,
-      last_7d: last7d,
-      active_rules: activeRules,
-      active_endpoints: totalEndpoints,
-      by_model: byModel.map(r => ({ from: r._id.from, to: r._id.to, count: r.count })),
-      by_rule: byRule.map(r => ({ id: r._id.id, name: r._id.name, count: r.count })),
-      by_sensitivity: bySensitivity.map(r => ({ sensitivity: r._id, count: r.count })),
-      by_complexity: byComplexity.map(r => ({ complexity: r._id, count: r.count })),
-      daily_trend: dailyTrend.map(r => ({ date: r._id, count: r.count })),
-    };
-  }
+/** The client-facing projection of a stored rule: no audit or migration fields. */
+function policyRule(r) {
+  const { created_at, updated_at, migrated_from_v1, _id, ...rest } = r;
+  return rest;
 }
 
-// The work behind GET /api/v1/routing/log, pulled out of the handler so the
-// route can race it against the budget and the boot warmer can run the same
-// read.
-async function fetchRoutingLog(db, log, limit) {
-  // Routing events are stored in dlp_events (sent by browser extension as
-  // kind: 'model_routed'). The dedicated routing_log collection only has
-  // entries from the proxy path. Merge both sources.
-  const [dlpRows, logRows] = await Promise.all([
+// ── Analytics over dlp_events model_routed ────────────────────────────────
+
+// "Requests Routed" means the model actually CHANGED. New events carry a
+// top-level routing_result (dlp.js); events from clients that predate it only
+// have metadata.ui_changed, so `true` there counts as applied.
+const APPLIED = {
+  event_kind: 'model_routed',
+  $or: [
+    { routing_result: 'applied' },
+    { routing_result: { $exists: false }, metadata_json: { $regex: '"ui_changed":true' } },
+  ],
+};
+// The per-model / per-rule / per-complexity breakdowns and the trend are over
+// this window, bounded, so the read cannot grow with the event table.
+const BREAKDOWN_DAYS = 14;
+const BREAKDOWN_ROW_CAP = 5000;
+
+const parseMeta = (v) => {
+  if (v && typeof v === 'object') return v;
+  try { return JSON.parse(v || '{}') || {}; } catch { return {}; }
+};
+
+const SOURCE_FOR_MECHANISM = {
+  browser_extension: 'browser_extension',
+  desktop_uia: 'desktop_agent',
+  desktop_web_uia: 'desktop_agent',
+  proxy: 'proxy',
+};
+
+async function fetchRoutingAnalytics(db) {
+  const events = db.collection('dlp_events');
+  const now = Date.now();
+  const since24h = new Date(now - 86400000).toISOString();
+  const since7d = new Date(now - 7 * 86400000).toISOString();
+  const sinceWin = new Date(now - BREAKDOWN_DAYS * 86400000).toISOString();
+
+  // Independent reads, issued at once (see the history in the analytics test).
+  const [total, last24h, last7d, activeRules, activeEndpoints, recent, ruleNames] = await Promise.all([
+    events.countDocuments(APPLIED),
+    events.countDocuments({ ...APPLIED, occurred_at: { $gte: since24h } }),
+    events.countDocuments({ ...APPLIED, occurred_at: { $gte: since7d } }),
+    db.collection('routing_rules').countDocuments({ enabled: true }),
+    db.collection('routing_endpoints').countDocuments({ enabled: true }),
+    events.find({ ...APPLIED, occurred_at: { $gte: sinceWin } })
+      .sort({ occurred_at: -1 }).limit(BREAKDOWN_ROW_CAP)
+      .project({ _id: 0, occurred_at: 1, metadata_json: 1 }).toArray(),
+    db.collection('routing_rules').find({}).project({ _id: 0, id: 1, name: 1 }).toArray(),
+  ]);
+
+  const nameById = new Map(ruleNames.map((r) => [r.id, r.name]));
+  const byModel = new Map();
+  const byRule = new Map();
+  const byComplexity = new Map();
+  const byDay = new Map();
+  const bump = (m, k, init) => { const cur = m.get(k) || { ...init, count: 0 }; cur.count++; m.set(k, cur); };
+
+  for (const row of recent) {
+    const m = parseMeta(row.metadata_json);
+    const from = m.from_label || m.from_tier || m.current_tier || null;
+    const to = m.to_label || m.model || m.routed_model || m.to_tier || null;
+    bump(byModel, `${from}\u0000${to}`, { from, to });
+    const rid = m.rule_id || null;
+    const rname = (rid && nameById.get(rid)) || m.rule_name || null;
+    bump(byRule, `${rid}\u0000${rname}`, { id: rid, name: rname });
+    if (m.complexity) bump(byComplexity, m.complexity, { complexity: m.complexity });
+    const day = String(row.occurred_at || '').slice(0, 10);
+    if (day) bump(byDay, day, { date: day });
+  }
+  const desc = (m) => [...m.values()].sort((x, y) => y.count - x.count);
+
+  return {
+    total_routed: total,
+    last_24h: last24h,
+    last_7d: last7d,
+    active_rules: activeRules,
+    active_endpoints: activeEndpoints,
+    by_model: desc(byModel).slice(0, 20),
+    by_rule: desc(byRule).slice(0, 20),
+    // Sensitivity is not part of a routing event (it would be DLP content-
+    // adjacent); kept as an empty list so the response shape is unchanged.
+    by_sensitivity: [],
+    by_complexity: desc(byComplexity),
+    daily_trend: [...byDay.values()].sort((x, y) => (x.date < y.date ? -1 : 1)),
+    breakdown_window_days: BREAKDOWN_DAYS,
+  };
+}
+
+async function fetchRoutingLog(db, limit) {
+  const [rows, ruleNames] = await Promise.all([
     db.collection('dlp_events')
       .find({ event_kind: 'model_routed' })
       .sort({ occurred_at: -1 }).limit(limit)
-      .project({ _id: 0, id: 1, machine_id: 1, occurred_at: 1, ai_service: 1, metadata_json: 1 })
+      .project({ _id: 0, id: 1, machine_id: 1, occurred_at: 1, ai_service: 1, source: 1, routing_result: 1, metadata_json: 1 })
       .toArray(),
-    log.find({}).sort({ timestamp: -1 }).limit(limit).project({ _id: 0 }).toArray(),
+    db.collection('routing_rules').find({}).project({ _id: 0, id: 1, name: 1 }).toArray(),
   ]);
-  // Normalize dlp_events to routing log format
-  const normalized = dlpRows.map(r => {
-    let meta = {};
-    try { meta = typeof r.metadata_json === 'string' ? JSON.parse(r.metadata_json) : (r.metadata_json || {}); } catch {}
+  const nameById = new Map(ruleNames.map((r) => [r.id, r.name]));
+  return rows.map((r) => {
+    const m = parseMeta(r.metadata_json);
+    const result = r.routing_result
+      || (m.ui_changed === true ? 'applied' : m.ui_changed === false ? 'noop' : null);
     return {
+      id: r.id,
       timestamp: r.occurred_at,
       machine_id: r.machine_id,
-      original_model: null,
-      routed_model: meta.routed_model || null,
-      rule_name: meta.rule_name || null,
-      sensitivity: meta.sensitivity || null,
-      complexity: meta.complexity || meta.current_tier || null,
-      provider: meta.provider || null,
+      original_model: m.from_label || m.from_tier || null,
+      routed_model: m.to_label || m.model || m.routed_model || m.to_tier || null,
+      rule_id: m.rule_id || null,
+      rule_name: (m.rule_id && nameById.get(m.rule_id)) || m.rule_name || null,
+      sensitivity: null,
+      complexity: m.complexity || null,
+      provider: m.provider || null,
+      from_tier: m.from_tier || m.current_tier || null,
+      to_tier: m.to_tier || null,
+      effort_from: m.effort_from || null,
+      effort_to: m.effort_to || null,
+      result,
+      mechanism: m.mechanism || null,
+      surface: m.surface || null,
+      host_or_app: m.host_or_app || m.tab_host || null,
+      prompt_tokens_est: null,
       ai_service: r.ai_service || null,
-      source: 'browser_extension',
+      source: SOURCE_FOR_MECHANISM[m.mechanism] || r.source || 'browser_extension',
     };
   });
-  // Merge and sort by time
-  const all = [...normalized, ...logRows.map(r => ({ ...r, source: 'proxy' }))];
-  all.sort((a, b) => (b.timestamp || b.occurred_at || '') > (a.timestamp || a.occurred_at || '') ? 1 : -1);
-  return all.slice(0, limit);
 }
-
-// ── Rule Matching ──────────────────────────────────────────────────────
-
-function matchesConditions(conditions, ctx) {
-  if (conditions.sensitivity) {
-    const targets = Array.isArray(conditions.sensitivity) ? conditions.sensitivity : [conditions.sensitivity];
-    if (!ctx.sensitivity || !targets.includes(ctx.sensitivity)) return false;
-  }
-  if (conditions.complexity) {
-    const targets = Array.isArray(conditions.complexity) ? conditions.complexity : [conditions.complexity];
-    if (!ctx.complexity || !targets.includes(ctx.complexity)) return false;
-  }
-  if (conditions.provider) {
-    const targets = Array.isArray(conditions.provider) ? conditions.provider : [conditions.provider];
-    const hostProvider = providerFromHost(ctx.host);
-    if (!targets.includes(hostProvider)) return false;
-  }
-  if (conditions.model) {
-    const targets = Array.isArray(conditions.model) ? conditions.model : [conditions.model];
-    const modelLower = (ctx.model || '').toLowerCase();
-    if (!targets.some(t => modelLower.includes(t.toLowerCase()))) return false;
-  }
-  if (conditions.prompt_tokens_gt != null) {
-    if ((ctx.prompt_tokens || 0) <= conditions.prompt_tokens_gt) return false;
-  }
-  if (conditions.prompt_tokens_lt != null) {
-    if ((ctx.prompt_tokens || Infinity) >= conditions.prompt_tokens_lt) return false;
-  }
-  return true;
-}
-
-function providerFromHost(host) {
-  if (!host) return 'unknown';
-  const h = host.toLowerCase();
-  if (h.includes('openai'))      return 'openai';
-  if (h.includes('anthropic'))   return 'anthropic';
-  if (h.includes('googleapis') || h.includes('google')) return 'google';
-  if (h.includes('copilot') || h.includes('microsoft')) return 'microsoft';
-  if (h.includes('perplexity'))  return 'perplexity';
-  if (h.includes('huggingface')) return 'huggingface';
-  return 'unknown';
-}
-
-function resolveAction(action, endpoints, originalModel) {
-  if (action.model) {
-    return { model: action.model, host: action.host || null };
-  }
-  if (action.endpoint_id) {
-    const ep = endpoints.find(e => e.id === action.endpoint_id);
-    if (ep && ep.enabled) {
-      return { model: ep.models?.[0] || originalModel, host: ep.host || null };
-    }
-  }
-  return null;
-}
-
-// Exported for the agent-side router to reuse the same logic.
-export { matchesConditions, providerFromHost, resolveAction };

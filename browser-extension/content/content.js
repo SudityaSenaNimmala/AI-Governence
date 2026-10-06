@@ -1094,7 +1094,8 @@
   //
   // Routes BOTH directions:
   //   - Downgrade: user picks Opus for "hi" → routes to Haiku (save money)
-  //   - Upgrade:   user picks Haiku for architecture design → routes to Sonnet (ensure quality)
+  //   - Upgrade:   user picks Haiku for an architecture design → routes to Opus (ensure quality)
+  // allow_upgrade (policy setting, default true) can cap upgrades at the tier the user chose.
 
   // Complexity classification lives in content/complexity.js (window.__cfaiComplexity).
   // It used to be two flat keyword regexes here with a character-length fallback,
@@ -1103,110 +1104,27 @@
   // tests/complexity.test.mjs.
   function classifyComplexity(text) {
     const c = window.__cfaiComplexity;
-    // Load-order failure: hold no opinion. 'moderate' leaves a premium model
-    // alone rather than silently downgrading the user's choice on a bad load.
-    if (!c) return 'moderate';
-    try { return c.classify(text); } catch { return 'moderate'; }
+    // Load-order failure: hold no opinion. 'unknown' matches no complexity rule
+    // and no built-in tier, so decideRoute() leaves the model alone. ('moderate'
+    // used to be safe here, but routing now goes both ways and 'moderate' would
+    // move a premium model DOWN to standard on a bad load.)
+    if (!c) return 'unknown';
+    try { return c.classify(text); } catch { return 'unknown'; }
   }
 
   // ── Model tier detection (Smart Model Router) ────────────────────────────
-
-  /**
-   * The model tiers each PLATFORM offers, keyed by host. Tier numbers match
-   * TIER_NUM: 3 = premium, 2 = standard, 1 = economy. The string is the label to
-   * look for in that platform's own model picker.
-   *
-   * WHY KEYED BY HOST AND NOT BY VENDOR. Tier detection used to be one ordered
-   * keyword chain over the whole button text with no idea which site it was on,
-   * and that cannot be extended past three vendors without cross-talk:
-   *
-   *   - 'mini' meant openai/economy, so Grok 3 mini read as OpenAI and the router
-   *     would then hunt for "GPT-4o mini" in xAI's picker.
-   *   - 'pro' meant google/premium, so Perplexity's "Sonar Pro" read as Google
-   *     and it would hunt for Gemini's labels.
-   *   - Perplexity and Poe PROXY other vendors ("Claude Sonnet", "GPT-4o"), so
-   *     keyword matching attributes them to the wrong picker entirely.
-   *
-   * The host decides the vendor, so a label can never leak across platforms.
-   * A host that is not listed keeps the old keyword-only behaviour, so nothing
-   * that works today changes.
-   */
-  const PLATFORM_TIERS = {
-    'claude.ai':            { vendor: 'anthropic',  3: 'Opus',     2: 'Sonnet',    1: 'Haiku' },
-    'chatgpt.com':          { vendor: 'openai',     3: 'GPT-4',    2: 'GPT-4o',    1: 'GPT-4o mini' },
-    'chat.openai.com':      { vendor: 'openai',     3: 'GPT-4',    2: 'GPT-4o',    1: 'GPT-4o mini' },
-    'gemini.google.com':    { vendor: 'google',     3: 'Pro',      2: 'Thinking',  1: 'Flash' },
-    'aistudio.google.com':  { vendor: 'google',     3: 'Pro',      2: 'Thinking',  1: 'Flash' },
-    // Le Chat. 'chat.mistral.ai' is listed before the bare domain and matched by
-    // longest key, so the app host wins over the marketing site.
-    'chat.mistral.ai':      { vendor: 'mistral',    3: 'Large',    2: 'Medium',    1: 'Small' },
-    'mistral.ai':           { vendor: 'mistral',    3: 'Large',    2: 'Medium',    1: 'Small' },
-    'perplexity.ai':        { vendor: 'perplexity', 3: 'Research', 2: 'Sonar Pro', 1: 'Sonar' },
-  };
-
-  /** The PLATFORM_TIERS entry for a host — longest matching key wins. */
-  function platformTiers(host) {
-    const h = String(host || '').toLowerCase();
-    if (!h) return null;
-    let best = null, bestLen = 0;
-    for (const key of Object.keys(PLATFORM_TIERS)) {
-      if ((h === key || h.endsWith('.' + key) || h.includes(key)) && key.length > bestLen) {
-        best = PLATFORM_TIERS[key];
-        bestLen = key.length;
-      }
-    }
-    return best;
-  }
-
-  // Local copy so this region stays evaluable ON ITS OWN — the tests slice it
-  // out of the file and run it with no surrounding scope, which is the whole
-  // reason nothing in here may reference a declaration further down the file.
-  // Same values as TIER_NAME.
-  const TIER_NAME_LOCAL = { 3: 'premium', 2: 'standard', 1: 'economy' };
-
-  /**
-   * Which of a platform's own tier labels the button text is showing.
-   * LONGEST LABEL FIRST: Perplexity offers both "Sonar" and "Sonar Pro", and
-   * matching the short one first would read Pro as economy.
-   */
-  function tierFromPlatformLabels(text, entry) {
-    const t = String(text || '').toLowerCase();
-    if (!t) return null;
-    const byLen = [3, 2, 1]
-      .filter((n) => entry[n])
-      .sort((a, b) => String(entry[b]).length - String(entry[a]).length);
-    for (const n of byLen) {
-      if (t.includes(String(entry[n]).toLowerCase())) return TIER_NAME_LOCAL[n];
-    }
-    return null;
-  }
-
-  /**
-   * Detect provider + tier from the model button text.
-   *
-   * `host` is OPTIONAL and additive: with it, the platform's own labels are
-   * consulted first and the vendor comes from the host, which is what stops
-   * label cross-talk. Without it the behaviour is exactly the historic
-   * keyword chain — which is what keeps every existing caller and test valid.
-   */
-  function detectModelInfo(text, host) {
-    const entry = host ? platformTiers(host) : null;
-    if (entry) {
-      const tier = tierFromPlatformLabels(text, entry);
-      if (tier) return { provider: entry.vendor, tier };
-      // A proxied model ("Claude Sonnet" inside Perplexity): take the TIER from
-      // the keyword chain but keep the vendor from the host, so the label we
-      // later click still comes from this platform's picker.
-      const legacy = detectModelInfoByKeyword(text);
-      if (legacy) return { provider: entry.vendor, tier: legacy.tier };
-      return null;
-    }
-    return detectModelInfoByKeyword(text);
-  }
+  //
+  // VENDOR-LEVEL KEYWORD CHAIN ONLY. Host-scoped tier reading — which picker
+  // label means which tier ON THIS SITE — now lives in the shared catalog
+  // (shared/model-catalog.json, bundled as content/model-routing.js) and is read
+  // with __cfaiRouting.detectTierFromLabel(). This chain is kept because it is the
+  // reference the desktop enforcer's TIER_KEYWORD_RULES are parity-tested against
+  // (agent/tests/model-router-config.test.mjs), and it is the fallback used to
+  // name a provider when a page is not in the catalog.
 
   // Detect model tier from button text or model ID.
   // Handles current + future model names dynamically by keyword matching.
-  function detectModelInfoByKeyword(text) {
+  function detectModelInfo(text) {
     const t = (text || '').toLowerCase();
 
     // Anthropic — Fable and Opus are premium, Sonnet is standard, Haiku is economy
@@ -1231,12 +1149,11 @@
     if (t.includes('chatgpt'))                                          return { provider: 'openai', tier: 'standard' };
 
     // Google — Gemini renamed its lineup from Flash/Pro/Ultra to Flash/Thinking/Pro
-    // (confirmed against Google's own pricing/plan pages, 2026-08). "Thinking" is a
-    // reasoning mode layered on Flash, priced close to Flash; "Pro" is now the
-    // separate, priciest flagship gated behind a paid plan — so the tier order is
-    // Flash (cheapest) < Thinking (middle) < Pro (priciest), not a straight rename.
-    // "ultra" is kept as a legacy/back-compat match in case an older or
-    // enterprise surface still shows it.
+    // (confirmed against Google's own pricing/plan pages, 2026-08). "ultra" is kept
+    // as a legacy/back-compat match. NOTE: the live gemini.google.com picker has
+    // since moved to 3.5 Flash-Lite / 3.8 Flash / 3.1 Pro, where this chain reads
+    // both Flash tiers as economy — which is exactly why the browser router reads
+    // the tier through the catalog's boundary-matched patterns instead.
     if (t.includes('flash') || t.includes('lite'))  return { provider: 'google', tier: 'economy' };
     if (t.includes('thinking'))                     return { provider: 'google', tier: 'standard' };
     if (t.includes('pro'))                          return { provider: 'google', tier: 'premium' };
@@ -1246,268 +1163,428 @@
   }
   // ── end model tier detection ─
 
-  // Smart routing table: [provider][currentTier][complexity] → target
-  // Uses UI DISPLAY NAMES (what the user sees in the dropdown), NOT API model IDs.
-  // This way we don't need to know or hardcode API IDs — the app sends the right
-  // one automatically when the dropdown changes.
-  const ROUTE_TABLE = {
-    anthropic: {
-      premium: {  // Opus, Fable
-        simple:   { uiName: 'Haiku',  reason: 'Simple prompt → Haiku (10x cheaper)' },
-        moderate: { uiName: 'Sonnet', reason: 'Standard prompt → Sonnet (5x cheaper)' },
-        complex:  null,
-      },
-      standard: { // Sonnet
-        simple:   { uiName: 'Haiku',  reason: 'Simple prompt → Haiku (faster + cheaper)' },
-        moderate: null,
-        complex:  null,
-      },
-      economy: {  // Haiku
-        simple:   null,
-        moderate: null,
-        complex:  { uiName: 'Sonnet', reason: 'Complex prompt → upgraded to Sonnet' },
-      },
-    },
-    openai: {
-      premium: {  // GPT-4, o1, o3
-        simple:   { uiName: 'GPT-4o mini', reason: 'Simple prompt → GPT-4o mini (66x cheaper)' },
-        moderate: { uiName: 'GPT-4o',      reason: 'Standard prompt → GPT-4o (balanced)' },
-        complex:  null,
-      },
-      standard: { // GPT-4o
-        simple:   { uiName: 'GPT-4o mini', reason: 'Simple prompt → GPT-4o mini (cheaper)' },
-        moderate: null,
-        complex:  null,
-      },
-      economy: {  // GPT-4o mini, GPT-3.5
-        simple:   null,
-        moderate: null,
-        complex:  { uiName: 'GPT-4o',      reason: 'Complex prompt → upgraded to GPT-4o' },
-      },
-    },
-    google: {
-      premium: {  // Gemini Ultra/Pro
-        simple:   { uiName: 'Flash',          reason: 'Simple prompt → Flash (fastest)' },
-        moderate: { uiName: 'Flash',          reason: 'Standard prompt → Flash' },
-        complex:  null,
-      },
-      standard: { // Gemini Pro
-        simple:   { uiName: 'Flash',          reason: 'Simple prompt → Flash (faster)' },
-        moderate: null,
-        complex:  null,
-      },
-      economy: {  // Gemini Flash
-        simple:   null,
-        moderate: null,
-        complex:  { uiName: 'Pro',            reason: 'Complex prompt → upgraded to Pro' },
-      },
-    },
-  };
-
-  // ── User ceiling tracking ──
-  // The "ceiling" is what the user MANUALLY selected — the most expensive
-  // model they're willing to pay for. We optimize within that ceiling.
-  // When we change the model via routing, we DON'T update the ceiling.
-  let _userCeiling = null;    // { provider, tier, modelText }
-  let _weAreRouting = false;  // true while our code is changing the model
-
-  const TIER_NUM = { premium: 3, standard: 2, economy: 1 };
-  const TIER_NAME = { 3: 'premium', 2: 'standard', 1: 'economy' };
-
-  // Maps provider + tier number → UI name to search for in dropdown
-  const TIER_UI_NAME = {
-    anthropic: { 3: 'Opus', 2: 'Sonnet', 1: 'Haiku' },
-    openai:    { 3: 'GPT-4', 2: 'GPT-4o', 1: 'GPT-4o mini' },
-    google:    { 3: 'Pro', 2: 'Thinking', 1: 'Flash' },
-  };
-
-  const TIER_REASON = {
-    upgrade:   { 3: 'Complex prompt → premium model', 2: 'Complex prompt → upgraded for quality', 1: '' },
-    downgrade: { 2: 'Standard prompt → balanced model', 1: 'Simple prompt → fastest & cheapest' },
-  };
-
-  /**
-   * The label to click for a target tier on this host. The host-scoped table
-   * wins; TIER_UI_NAME is the vendor-level fallback for a host that is not
-   * listed, so unlisted platforms behave exactly as they did before.
-   *
-   * Lives OUTSIDE the model-tier-detection region on purpose: it reads
-   * TIER_UI_NAME, which is declared here, and that region is sliced out and
-   * executed standalone by tests/load-model-router.mjs — anything in there that
-   * referenced a later declaration would break the loader.
-   */
-  function tierLabelFor(host, provider, tierNum) {
-    const entry = platformTiers(host);
-    if (entry && entry[tierNum]) return entry[tierNum];
-    return (TIER_UI_NAME[provider] || {})[tierNum] || null;
-  }
-
-  // ── Admin routing rules (synced from the server) ─────────────────────────
-  // The service worker has always written /api/v1/routing/rules into
-  // chrome.storage under 'cfai.routing_rules' — and NOTHING read it. Every
-  // rule an admin configured was dead on arrival, which is why routing
-  // analytics attributed 1 of 252 routes to a rule_id. This is the reader.
+  // ── Model routing — shared decideRoute (shared/decide-route.js) ──────────
   //
-  // A rule only ever OVERRIDES the built-in choice, so an empty, unsynced or
-  // unreachable rule set leaves the built-in behaviour intact rather than
-  // disabling routing.
-  let _serverRules = [];
+  // WHAT DECIDES. window.__cfaiRouting.decideRoute(ctx, policy) — the same pure
+  // function the desktop enforcer ports, pinned by
+  // shared/routing-decision-vectors.json. This file only GATHERS the context
+  // (which tier the picker shows, what the user chose, did the user override us)
+  // and EXECUTES the decision (drive the picker, set effort, report). It holds no
+  // tier table, no label table and no rule matcher of its own any more: the
+  // ROUTE_TABLE / TIER_UI_NAME / PLATFORM_TIERS / serverRuleFor quartet that used
+  // to live here disagreed with each other and with the live pickers.
+  //
+  // WHAT IS GONE AND WHY:
+  //   * the fetch-blocker "backup" model rewrite. It threw in strict mode (a bare
+  //     `arguments` in a wrapper) and, where it ran, wrote the picker LABEL
+  //     ("Haiku") into the API body's `model` field — and it emitted
+  //     'cfai-route-applied' / "ROUTED fetch" telemetry for rewrites that never
+  //     happened. Routing is the picker switch, verified, or nothing.
+  //   * the global "ceiling" that ratcheted UP from our own routes and was shared
+  //     across every site. The user's choice is now tracked per (host, provider)
+  //     and is set ONLY by a picker change we did not make.
 
-  function applyServerRules(list) {
-    _serverRules = Array.isArray(list)
-      ? list.filter(r => r && r.enabled !== false)
-            .sort((a, b) => (a.priority || 50) - (b.priority || 50))
-      : [];
-    if (_serverRules.length) clog('[cfai] routing rules loaded:', _serverRules.length);
-  }
+  const ROUTING = (typeof window !== 'undefined' && window.__cfaiRouting) || null;
+  const ROUTING_USER_CHOICE_KEY = 'cfai.routing_user_choice';   // { 'host|provider': { tier, at } }
+  const ROUTING_LAST_ROUTE_KEY = 'cfai.routing_last_route';     // { 'host|provider': { tier, at } }
+  const ROUTING_POLICY_KEY = 'cfai.routing_policy';             // { policy, etag, at, source } (service worker)
+  const ROUTING_RULES_KEY = 'cfai.routing_rules';               // legacy v1 array (service worker, fallback)
 
-  try {
-    chrome.storage.local.get(['cfai.routing_rules'], (r) => applyServerRules(r['cfai.routing_rules']));
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === 'local' && changes['cfai.routing_rules']) {
-        applyServerRules(changes['cfai.routing_rules'].newValue);
-      }
-    });
-  } catch (e) {
-    // Extension context gone; built-in routing still works.
-  }
+  let _routingPolicyDoc = null;   // v2 policy object from GET /api/v1/routing/policy
+  let _routingLegacyRules = null; // v1 array from GET /api/v1/routing/rules (only when v2 is absent)
+  let _routingUserChoice = {};
+  let _routingLastRoute = {};
+  let _weAreRouting = false;      // true while OUR code is driving the picker
+  let _routeExpect = null;        // { key, tier, at } — what we last switched this tab to
+  let _pickerLastSeen = null;     // { key, tier } — last tier the poller observed
+  const _overrideConvs = new Set();        // conversation keys the user took back from us
+  const _overrideReported = new Set();     // ...and that we already reported once
+  const _unsupportedReported = new Set();  // 'reason' — one report per page load
 
-  /**
-   * First rule matching this provider + complexity (+ optional host), by
-   * priority. An absent or empty condition array means "any", matching how the
-   * server's own /routing/decide treats them.
-   */
-  function serverRuleFor(provider, complexity, host) {
-    const anyOf = (arr, v) => !Array.isArray(arr) || arr.length === 0 || arr.includes(v);
-    for (const r of _serverRules) {
-      const c = r.conditions || {};
-      if (!anyOf(c.provider, provider)) continue;
-      if (!anyOf(c.complexity, complexity)) continue;
-      if (Array.isArray(c.host) && c.host.length
-          && !c.host.some(h => String(host || '').includes(h))) continue;
-      return r;
-    }
+  function routingPolicy() {
+    if (_routingPolicyDoc && typeof _routingPolicyDoc === 'object') return _routingPolicyDoc;
+    if (Array.isArray(_routingLegacyRules)) return _routingLegacyRules;
     return null;
   }
 
-  // Load persisted ceiling from chrome.storage (survives extension refresh)
-  try {
-    chrome.storage.local.get('cfai.user_ceiling', (data) => {
-      if (data['cfai.user_ceiling']) {
-        _userCeiling = data['cfai.user_ceiling'];
-        clog('[cfai] ceiling restored:', _userCeiling.modelText, '→', _userCeiling.tier);
-      }
-    });
-  } catch {}
-
-  function updateUserCeiling() {
-    if (_weAreRouting) return;
-    const btn = getModelButton();
-    if (!btn) return;
-    const text = (btn.textContent || '').trim();
-    const info = detectModelInfo(text);
-    if (!info) return;
-    const newTierNum = TIER_NUM[info.tier] || 2;
-    const oldTierNum = _userCeiling ? (TIER_NUM[_userCeiling.tier] || 2) : 0;
-
-    // Only update ceiling if user manually selected a HIGHER tier model.
-    // This prevents our own downgrades from lowering the ceiling.
-    if (newTierNum > oldTierNum || !_userCeiling || _userCeiling.provider !== info.provider) {
-      _userCeiling = { ...info, modelText: text };
-      clog('[cfai] user ceiling updated:', text, '→', info.tier);
-      try { chrome.storage.local.set({ 'cfai.user_ceiling': _userCeiling }); } catch {}
+  function applyRoutingStorage(r) {
+    if (!r) return;
+    if (ROUTING_POLICY_KEY in r) {
+      const doc = r[ROUTING_POLICY_KEY];
+      _routingPolicyDoc = doc && doc.policy && typeof doc.policy === 'object' ? doc.policy : null;
     }
+    if (ROUTING_RULES_KEY in r) _routingLegacyRules = Array.isArray(r[ROUTING_RULES_KEY]) ? r[ROUTING_RULES_KEY] : null;
+    if (ROUTING_USER_CHOICE_KEY in r) _routingUserChoice = r[ROUTING_USER_CHOICE_KEY] || {};
+    if (ROUTING_LAST_ROUTE_KEY in r) _routingLastRoute = r[ROUTING_LAST_ROUTE_KEY] || {};
   }
 
-  // Check for manual model changes every 2s
-  setInterval(updateUserCeiling, 2000);
-  // Initial detection
-  setTimeout(updateUserCeiling, 1000);
+  try {
+    chrome.storage.local.get(
+      [ROUTING_POLICY_KEY, ROUTING_RULES_KEY, ROUTING_USER_CHOICE_KEY, ROUTING_LAST_ROUTE_KEY],
+      (r) => applyRoutingStorage(r),
+    );
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      const r = {};
+      for (const k of [ROUTING_POLICY_KEY, ROUTING_RULES_KEY, ROUTING_USER_CHOICE_KEY, ROUTING_LAST_ROUTE_KEY]) {
+        if (changes[k]) r[k] = changes[k].newValue;
+      }
+      applyRoutingStorage(r);
+    });
+  } catch (e) {
+    // Extension context gone; the built-in table inside decideRoute still applies.
+  }
 
-  function smartRoute(currentModelText, promptText) {
-    // Host is passed so the platform's own tier labels are used and the vendor
-    // comes from the site, not from a keyword that might belong to someone else.
-    const host = (typeof window !== 'undefined' && window.location) ? window.location.hostname : '';
-    const current = detectModelInfo(currentModelText, host);
-    if (!current) return null;
+  /** The catalog entry for this page (with admin catalog overrides), or null. */
+  function routingSurface() {
+    if (!ROUTING) return null;
+    try { return ROUTING.resolveSurface('browser', location.hostname, routingPolicy(), null); } catch { return null; }
+  }
 
-    // Set ceiling on first detection if not set
-    if (!_userCeiling) {
-      _userCeiling = { ...current, modelText: currentModelText };
-    }
+  // The effort token claude.ai appends to the model name on the picker button
+  // ('Opus 5 High'). A CLOSED SET, matched as the LAST token only — the rest of
+  // the label is page text and is never reported. Same rule as ai-processes.js
+  // parseModelPickerLabel / MODEL_EFFORT_TOKENS.
+  const EFFORT_TOKENS = { low: 'low', medium: 'medium', high: 'high' };
+  function effortFromButtonText(text, entry) {
+    if (!entry || !entry.effort || entry.effort.supported !== true) return null;
+    const parts = String(text || '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length < 2) return null;
+    return EFFORT_TOKENS[parts[parts.length - 1].toLowerCase()] || null;
+  }
 
-    // If ceiling is for a different provider or not set, use standard as default ceiling
-    const ceiling = (_userCeiling && _userCeiling.provider === current.provider)
-      ? _userCeiling
-      : { ...current, tier: 'standard' };  // assume standard ceiling if unknown
-
-    const complexity = classifyComplexity(promptText);
-    const ceilingNum = TIER_NUM[ceiling.tier] || 2;
-    const currentNum = TIER_NUM[current.tier] || 2;
-
-    // Determine target tier based on complexity
-    let targetNum;
-    if (complexity === 'simple') {
-      targetNum = 1;  // economy — cheapest
-    } else if (complexity === 'complex') {
-      // Complex prompts ALWAYS get at least standard (tier 2).
-      // If user's ceiling is higher, use that.
-      targetNum = Math.max(ceilingNum, 2);
-    } else {
-      // moderate → standard tier
-      targetNum = 2;
-    }
-
-    // Cap at ceiling (don't exceed what user is willing to pay)
-    if (complexity !== 'complex') {
-      targetNum = Math.min(targetNum, Math.max(ceilingNum, 2));
-    }
-
-    // Already at the right tier?
-    if (targetNum === currentNum) return null;
-
-    const targetTierName = TIER_NAME[targetNum];
-
-    // An admin rule wins over the built-in label, so a platform that renames a
-    // tier can be corrected from the dashboard instead of by shipping a new
-    // extension. `action.ui_name` is what gets clicked; `action.model` is the API
-    // id used by the fetch-blocker path (see dispatchRouteModel), and the two are
-    // deliberately separate — a model id is not a picker label.
-    const rule = serverRuleFor(current.provider, complexity, host);
-    const uiName = (rule && rule.action && rule.action.ui_name)
-      || tierLabelFor(host, current.provider, targetNum);
-    if (!uiName) return null;
-
-    const direction = targetNum < currentNum ? 'downgrade' : 'upgrade';
-    const reason = (rule && rule.name)
-      || (direction === 'downgrade'
-        ? (TIER_REASON.downgrade[targetNum] || 'Optimized for this prompt')
-        : (TIER_REASON.upgrade[targetNum] || 'Upgraded for quality'));
-
+  /** { entry, key, provider, tier, effort } for the picker as it stands, or null. */
+  function readPickerState() {
+    const entry = routingSurface();
+    if (!entry || !entry.provider) return null;
+    const btn = getModelButton();
+    const text = btn ? (btn.textContent || '').trim() : '';
+    const tier = text ? ROUTING.detectTierFromLabel(entry, text) : null;
     return {
-      model: uiName,
-      uiName,
-      apiModel: (rule && rule.action && rule.action.model) || null,
-      rule_id: (rule && rule.id) || null,
-      rule_name: reason,
-      complexity,
-      currentTier: current.tier,
-      targetTier: targetTierName,
-      provider: current.provider,
+      entry,
+      key: ROUTING.normHostOrApp(location.hostname) + '|' + entry.provider,
+      provider: entry.provider,
+      tier: tier || null,
+      effort: text ? effortFromButtonText(text, entry) : null,
     };
   }
 
-  // Tell fetch-blocker (page context) to rewrite the model on next API call.
-  // This is the RELIABLE backup — always works regardless of UI changes.
-  function dispatchRouteModel(model, ruleName) {
-    document.dispatchEvent(new CustomEvent('cfai-route-model', {
-      detail: { model, rule_name: ruleName },
-    }));
+  /** Per-tab conversation key: the AI site's conversation id, else the path. */
+  function routingConvKey() {
+    const id = currentConvId();
+    return id ? 'c:' + id : 'p:' + (location.pathname || '/');
   }
 
-  document.addEventListener('cfai-route-applied', (e) => {
-    clog('[cfai] fetch-level route applied:', e.detail?.from, '→', e.detail?.to);
-  });
+  function persistRoutingMap(key, map) {
+    try { chrome.storage.local.set({ [key]: map }); } catch {}
+  }
+
+  function setUserChoice(key, tier) {
+    const prev = _routingUserChoice[key];
+    if (prev && prev.tier === tier) return;
+    _routingUserChoice = { ..._routingUserChoice, [key]: { tier, at: Date.now() } };
+    persistRoutingMap(ROUTING_USER_CHOICE_KEY, _routingUserChoice);
+    clog('[cfai] routing: user choice', key, '→', tier);
+  }
+
+  /**
+   * Watches the picker for changes WE did not make.
+   *
+   *   first sighting on this page — the site's remembered model. Adopted as the
+   *     user's choice, unless it is exactly the tier we last routed this
+   *     (host, provider) to: claude.ai remembers the last model, so after a
+   *     reload our own downgrade would otherwise be mistaken for a user pick.
+   *   a change while _weAreRouting — ours; ignored.
+   *   a change that lands on the tier we just routed to — our switch settling
+   *     late in the UI; ignored.
+   *   anything else — the USER picked a model. It becomes their choice, and if
+   *     we had routed this provider in this tab, the user has taken the
+   *     conversation back: routing is suppressed for it (respect_user_override).
+   */
+  function observePicker() {
+    if (!ROUTING || _weAreRouting) return;
+    let st;
+    try { st = readPickerState(); } catch { return; }
+    if (!st || !st.tier) return;
+    const prev = _pickerLastSeen;
+    if (prev && prev.key === st.key && prev.tier === st.tier) return;
+    _pickerLastSeen = { key: st.key, tier: st.tier };
+
+    if (!prev || prev.key !== st.key) {
+      const last = _routingLastRoute[st.key];
+      if (!last || last.tier !== st.tier) setUserChoice(st.key, st.tier);
+      return;
+    }
+    if (_routeExpect && _routeExpect.key === st.key && _routeExpect.tier === st.tier) return;
+
+    setUserChoice(st.key, st.tier);
+    if (_routeExpect && _routeExpect.key === st.key) {
+      _overrideConvs.add(routingConvKey());
+      _routeExpect = null;
+      clog('[cfai] routing: user overrode our route — suppressed for this conversation');
+    }
+  }
+
+  setInterval(observePicker, 2000);
+  setTimeout(observePicker, 1000);
+
+  /** The decision for one send. Never throws; null when routing cannot run here. */
+  function routeDecisionFor(text) {
+    if (!ROUTING) return null;
+    try {
+      const st = readPickerState();
+      const entry = st ? st.entry : routingSurface();
+      const ctx = {
+        surface: 'browser',
+        host_or_app: location.hostname,
+        provider: entry ? entry.provider : null,
+        current_tier: st ? st.tier : null,
+        user_tier: st && _routingUserChoice[st.key] ? _routingUserChoice[st.key].tier : null,
+        current_effort: st ? st.effort : null,
+        user_override: _overrideConvs.has(routingConvKey()),
+        complexity: classifyComplexity(text),
+        fleet_enabled: true,           // the policy document carries the fleet switch
+        machine_enabled: isFeatureOn('model_routing'),
+      };
+      return { ctx, st, entry, decision: ROUTING.decideRoute(ctx, routingPolicy()) };
+    } catch (e) {
+      clog('[cfai] routing decision failed:', e && e.message);
+      return null;
+    }
+  }
+
+  /** The catalog's canonical label for a tier — never raw page text. */
+  function canonicalLabel(entry, tier) {
+    const te = entry && tier && entry.tiers ? entry.tiers[tier] : null;
+    return te && te.click_labels && te.click_labels.length ? te.click_labels[0] : null;
+  }
+
+  /**
+   * The model_routed event. Every field is an enum, a catalog/rule label, an id
+   * or a number: NO prompt text and no raw page text (from_label is the
+   * catalog's name for the tier the picker showed, not the button's own string).
+   */
+  function emitModelRouted(r, extra) {
+    const d = r.decision;
+    const fields = {
+      mechanism: 'browser_extension',
+      surface: 'browser',
+      host_or_app: ROUTING ? ROUTING.normHostOrApp(location.hostname) : location.hostname,
+      provider: r.entry ? r.entry.provider : (r.ctx.provider || null),
+      from_tier: d.from_tier,
+      from_label: canonicalLabel(r.entry, d.from_tier),
+      to_tier: d.target_tier,
+      to_label: d.to_label,
+      model: d.model,
+      complexity: r.ctx.complexity,
+      rule_id: d.rule_id,
+      result: extra.result,
+      reason: extra.reason || d.reason,
+      effort_from: r.ctx.current_effort || null,
+      effort_to: extra.effort_to === undefined ? null : extra.effort_to,
+      len: extra.len,
+      // Legacy names, still read by server/src/routes/dlp.js for pre-v2 rows.
+      routed_model: d.to_label,
+      rule_name: d.rule_name,
+      current_tier: d.from_tier,
+      ui_changed: extra.ui_changed === undefined ? null : extra.ui_changed,
+    };
+    // `kind` first and literal: tests/load-conv-identity.mjs scans emit() calls for it.
+    emit({ kind: 'model_routed', ...fields });
+  }
+
+  /** Switch the picker to the decision's tier, trying each catalog label in turn.
+   *  Success is judged by READING THE TIER BACK, not by "the click happened". */
+  async function switchToTier(r) {
+    const d = r.decision;
+    for (const label of d.click_labels || []) {
+      let res = false;
+      try { res = await changeModelInUI(label); } catch {}
+      const after = readPickerState();
+      if (after && after.tier === d.target_tier) return { ok: true, label };
+      // Claude put up its "Switch model?" dialog and it could not be confirmed
+      // (it has been dismissed). Trying the next label would only reopen it.
+      if (res === SWITCH_CONFIRM_DECLINED) return { ok: false, label: null, reason: 'confirm_dialog_not_confirmed' };
+    }
+    return { ok: false, label: null };
+  }
+
+  // Claude's own "Switch model?" confirmation signature for this page, from the
+  // catalog (hosts.<host>.confirm_dialog), or null. Catalog data, not code: only
+  // a host that declares it is ever probed for the dialog (claude.ai today).
+  const SWITCH_CONFIRM_DECLINED = 'confirm_declined';
+  function routingConfirmDialogCfg() {
+    const entry = routingSurface();
+    if (!entry || !ROUTING || !ROUTING.CATALOG) return null;
+    const hosts = ROUTING.CATALOG.hosts || {};
+    let h = hosts[entry.key];
+    if (h && h.alias_of) h = hosts[h.alias_of];
+    const cd = h && h.confirm_dialog;
+    if (!cd || typeof cd.button_name_prefix !== 'string' || !cd.button_name_prefix.trim()) return null;
+    return cd;
+  }
+
+  /**
+   * Set effort through the picker's Effort submenu (claude.ai). Catalog-driven:
+   * entry.effort.menu_item_prefix opens the submenu, entry.effort.levels[level]
+   * is the item. NOT YET LIVE-VERIFIED for setting (catalog effort.verified:false)
+   * — it reports what the button reads afterwards, so a miss is recorded as the
+   * effort that actually applies, never as the one we asked for.
+   */
+  async function setEffortInUI(entry, level) {
+    const cfg = entry && entry.effort;
+    if (!cfg || cfg.supported !== true || !cfg.levels || !cfg.levels[level]) return readPickerState()?.effort || null;
+    const prefix = String(cfg.menu_item_prefix || 'Effort');
+    const want = String(cfg.levels[level]);
+    const btn = getModelButton();
+    if (!btn) return null;
+    const closeMenus = async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise((res) => setTimeout(res, 100));
+    };
+    try {
+      btn.click();
+      const opener = await waitForEl(() => {
+        for (const menu of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) {
+          if (!isVisibleEl(menu)) continue;
+          for (const el of menu.querySelectorAll('[role="menuitem"], [role="menuitemradio"], button, li')) {
+            const t = (el.textContent || '').trim();
+            if (t.length < 80 && t.toLowerCase().indexOf(prefix.toLowerCase()) === 0 && isVisibleEl(el)) return el;
+          }
+        }
+        return null;
+      });
+      if (!opener) { await closeMenus(); return readPickerState()?.effort || null; }
+      opener.click();
+      const item = await waitForEl(() => {
+        let best = null;
+        for (const menu of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) {
+          if (!isVisibleEl(menu)) continue;
+          for (const el of menu.querySelectorAll('*')) {
+            if (el === opener || el.children.length > 10) continue;
+            const t = (el.textContent || '').trim();
+            if (!t || t.length > 60 || t.toLowerCase().indexOf(prefix.toLowerCase()) === 0) continue;
+            if (!ROUTING.labelMatches(t, want) || !isVisibleEl(el)) continue;
+            if (!best || t.length < (best.textContent || '').trim().length) best = el;
+          }
+        }
+        return best;
+      });
+      if (!item) { await closeMenus(); await closeMenus(); return readPickerState()?.effort || null; }
+      item.click();
+      await new Promise((res) => setTimeout(res, 400));
+      _modelBtnCache = null;
+    } catch {
+      await closeMenus();
+    }
+    return readPickerState()?.effort || null;
+  }
+
+  function showSuggestionToast(fromLabel, toLabel, ruleName) {
+    showRoutingToast(fromLabel, toLabel, ruleName, 'Model suggestion');
+  }
+
+  /**
+   * Act on a decision at send time. Returns true when the send was PAUSED (the
+   * caller must return true and not log); the paused send is re-dispatched once
+   * the picker has been switched (or the switch has failed — the prompt is sent
+   * either way, on whatever model the picker ends up on).
+   */
+  function applyRouteDecision(r, text, e, el) {
+    const d = r.decision;
+    const len = text.length;
+
+    if (d.result === 'user_override') {
+      const conv = routingConvKey();
+      if (!_overrideReported.has(conv)) {
+        _overrideReported.add(conv);
+        emitModelRouted(r, { result: 'user_override', len });
+      }
+      return false;
+    }
+    if (d.result === 'unsupported') {
+      // A real routing intent this page cannot execute — report each reason once
+      // per page load so the gap is visible without one event per prompt.
+      if (d.reason === 'no_label_for_tier' && !_unsupportedReported.has(d.reason)) {
+        _unsupportedReported.add(d.reason);
+        emitModelRouted(r, { result: 'unsupported', len });
+      }
+      return false;
+    }
+    if (d.result === 'suggested') {
+      showSuggestionToast(canonicalLabel(r.entry, d.from_tier), d.to_label, d.rule_name);
+      emitModelRouted(r, { result: 'suggested', len });
+      return false;
+    }
+    if (d.result === 'observed') {
+      emitModelRouted(r, { result: 'observed', len });
+      return false;
+    }
+    if (d.result !== 'routed') return false;   // noop / disabled — nothing to do, nothing to report
+
+    // PAUSE the send
+    if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
+    clog('[cfai] ROUTE:', d.from_tier, '→', d.target_tier, d.effort ? '(effort ' + d.effort + ')' : '', d.reason);
+
+    _weAreRouting = true;
+    (async () => {
+      let tierOk = d.target_tier === d.from_tier;   // effort-only decisions keep the tier
+      let label = d.to_label;
+      let failReason = null;
+      if (!tierOk) {
+        const sw = await switchToTier(r);
+        tierOk = sw.ok;
+        if (sw.label) label = sw.label;
+        if (sw.reason) failReason = sw.reason;
+      }
+      let effortTo = null;
+      if (tierOk && d.effort) effortTo = await setEffortInUI(r.entry, d.effort);
+      return { tierOk, label, effortTo, failReason };
+    })().catch(() => ({ tierOk: false, label: d.to_label, effortTo: null, failReason: null })).then(({ tierOk, label, effortTo, failReason }) => {
+      _weAreRouting = false;
+      const st = r.st;
+      if (tierOk && st) {
+        _routeExpect = { key: st.key, tier: d.target_tier, at: Date.now() };
+        _pickerLastSeen = { key: st.key, tier: d.target_tier };
+        _routingLastRoute = { ..._routingLastRoute, [st.key]: { tier: d.target_tier, at: Date.now() } };
+        persistRoutingMap(ROUTING_LAST_ROUTE_KEY, _routingLastRoute);
+      }
+      const effortApplied = !!d.effort && effortTo === d.effort;
+      const applied = tierOk && (d.target_tier !== d.from_tier || effortApplied);
+      if (applied) showRoutingToast(canonicalLabel(r.entry, d.from_tier), label, d.rule_name);
+      emitModelRouted(
+        { ...r, decision: { ...d, to_label: label } },
+        {
+          result: applied ? 'applied' : 'failed',
+          reason: applied ? d.reason : (tierOk ? 'effort_not_applied' : (failReason || 'target_item_not_found')),
+          effort_to: effortTo,
+          ui_changed: applied,
+          len,
+        },
+      );
+
+      // Re-trigger the send
+      _skipRouting = true;
+      setTimeout(() => {
+        const target = (el && el.isConnected) ? el : findActivePromptInput();
+        if (target) {
+          // Closing the picker / Claude's "Switch model?" dialog leaves focus on
+          // the picker button. Put it back on the composer before the re-send
+          // (live, Desktop e32cf4d: the switch landed and the prompt sat unsent).
+          try {
+            if (document.activeElement !== target && typeof target.focus === 'function') target.focus({ preventScroll: true });
+          } catch {}
+          target.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+            bubbles: true, cancelable: true,
+          }));
+        }
+        setTimeout(() => { _skipRouting = false; }, 500);
+      }, 200);
+    });
+    return true;
+  }
+  // ── end model routing ─
 
   // ── Adaptive Model Selector — learns the DOM once, reuses, re-learns if stale ──
   // Cache stores the button element. If it's detached, we re-scan.
@@ -1668,6 +1745,125 @@
     }
     return out;
   }
+
+  // Claude's own "Switch model?" confirmation. Live 2026-10-05 (Claude Desktop,
+  // which renders claude.ai): in an EXISTING conversation, picking another model
+  // does not switch -- Claude opens a modal ("Switch model?" / "...This task is
+  // cached for the current model...") with "Cancel" and "Switch to Sonnet 5.5".
+  // Routing must switch automatically, so after the menu click the dialog is
+  // looked for (bounded) and its "Switch to <target>" button is clicked -- never
+  // Cancel, never a button naming another model. A dialog that cannot be
+  // confirmed is DISMISSED (its Cancel, else Escape) so the paused send goes
+  // out once, unrouted. `cfg` is the catalog's hosts.<host>.confirm_dialog.
+  const SWITCH_CONFIRM_DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"], dialog';
+
+  // shared/decide-route.js labelMatches(), restated: case-insensitive, at a
+  // token boundary; the char after must not be a letter, digit, '.' or '-'.
+  // So "Sonnet 5" does NOT match "Sonnet 5.5"; "Sonnet 5.5" and "Sonnet" do.
+  function confirmLabelHit(text, label) {
+    const t = String(text || '').toLowerCase();
+    const l = String(label || '').toLowerCase();
+    if (!l || t.length < l.length) return false;
+    const word = (ch) => /[0-9a-z]/i.test(ch);
+    for (let at = t.indexOf(l); at >= 0; at = t.indexOf(l, at + 1)) {
+      const before = at === 0 || !word(t[at - 1]);
+      const nx = t[at + l.length];
+      const after = nx === undefined || !(word(nx) || nx === '.' || nx === '-');
+      if (before && after) return true;
+    }
+    return false;
+  }
+
+  function hasConfirmPrefix(name, prefix) {
+    const n = String(name || '').trim();
+    const pf = String(prefix || '').trim();
+    if (!pf || n.length <= pf.length) return false;
+    return n.slice(0, pf.length).toLowerCase() === pf.toLowerCase() && /\s/.test(n[pf.length]);
+  }
+
+  /** Is this the "Switch to <TARGET>" button? The rest must name one of the
+   *  labels, or its family word ("Sonnet 5.5" -> "Sonnet"). */
+  function confirmButtonMatches(name, prefix, labels) {
+    if (!hasConfirmPrefix(name, prefix)) return false;
+    const rest = String(name).trim().slice(String(prefix).trim().length).trim();
+    if (!rest) return false;
+    for (const l of labels || []) {
+      if (!l) continue;
+      if (confirmLabelHit(rest, l)) return true;
+      const fam = String(l).trim().split(/\s+/)[0];
+      if (/^[A-Za-z]{3,}$/.test(fam) && confirmLabelHit(rest, fam)) return true;
+    }
+    return false;
+  }
+
+  /** The visible confirm dialog: { dialog, confirm, cancel } (confirm null when
+   *  nothing in it names the target), or null when there is none. A dialog with
+   *  neither the title nor a prefix button is not this dialog; one with only an
+   *  unrelated "Switch to ..." button and no title is ignored. */
+  function findSwitchConfirm(cfg, labels) {
+    if (!cfg || !cfg.button_name_prefix) return null;
+    const title = String(cfg.title_contains || '').toLowerCase();
+    const cancelName = String(cfg.cancel_button_name || '').trim().toLowerCase();
+    for (const dlg of document.querySelectorAll(SWITCH_CONFIRM_DIALOG_SELECTOR)) {
+      if (!isVisibleEl(dlg)) continue;
+      const buttons = [];
+      for (const b of dlg.querySelectorAll('button, [role="button"]')) if (isVisibleEl(b)) buttons.push(b);
+      const txt = (b) => (b.textContent || '').trim();
+      const hasTitle = !!title && (dlg.textContent || '').toLowerCase().indexOf(title) >= 0;
+      const confirm = buttons.find((b) => confirmButtonMatches(txt(b), cfg.button_name_prefix, labels)) || null;
+      if (!confirm && !hasTitle) continue;
+      const cancel = (cancelName && buttons.find((b) => txt(b).toLowerCase() === cancelName)) || null;
+      return { dialog: dlg, confirm, cancel };
+    }
+    return null;
+  }
+
+  function dismissSwitchConfirm(found) {
+    if (found && found.cancel) { try { found.cancel.click(); return; } catch {} }
+    if (typeof KeyboardEvent === 'function') {
+      try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true })); } catch {}
+    }
+  }
+
+  /**
+   * After the model menu click: wait (bounded) for EITHER the switch to show or
+   * the confirm dialog to appear, and confirm it. Never sends anything.
+   *   'switched'      the picker switched, no dialog
+   *   'no_dialog'     neither within appearMs (a new conversation; caller verifies)
+   *   'confirmed'     the dialog was confirmed and closed
+   *   'not_confirmed' the dialog could not be confirmed; it has been dismissed
+   */
+  async function confirmModelSwitch(cfg, labels, isSwitched, opts) {
+    const o = opts || {};
+    const appearMs = o.appearMs || 1500, settleMs = o.settleMs || 1500, stepMs = o.stepMs || 100;
+    const reclickMs = o.reclickMs || 600, maxClicks = o.maxClicks || 2;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const switched = () => { try { return !!isSwitched(); } catch { return false; } };
+    const appearBy = Date.now() + appearMs;
+    for (;;) {
+      if (switched()) return 'switched';
+      const found = findSwitchConfirm(cfg, labels);
+      if (found) {
+        if (!found.confirm) { dismissSwitchConfirm(found); return 'not_confirmed'; }
+        let clicks = 0, lastClick = 0;
+        const settleBy = Date.now() + settleMs;
+        for (;;) {
+          const cur = findSwitchConfirm(cfg, labels);
+          if (!cur) return 'confirmed';
+          if (switched()) return 'confirmed';
+          if (!cur.confirm) { dismissSwitchConfirm(cur); return 'not_confirmed'; }
+          if (clicks < maxClicks && (clicks === 0 || Date.now() - lastClick >= reclickMs)) {
+            try { cur.confirm.click(); } catch {}
+            clicks++; lastClick = Date.now();
+          }
+          if (Date.now() >= settleBy) { dismissSwitchConfirm(cur); return 'not_confirmed'; }
+          await sleep(stepMs);
+        }
+      }
+      if (Date.now() >= appearBy) return 'no_dialog';
+      await sleep(stepMs);
+    }
+  }
   // ── end model-menu option lookup ─
 
   async function changeModelInUI(targetModelId) {
@@ -1744,6 +1940,23 @@
       return false;
     }
 
+    // Claude's "Switch model?" dialog (existing conversations): confirm it
+    // automatically. Only for a host whose catalog entry declares it.
+    const confirmCfg = routingConfirmDialogCfg();
+    if (confirmCfg) {
+      const outcome = await confirmModelSwitch(confirmCfg, [targetText], () => {
+        _modelBtnCache = null;
+        const b = findModelButton();
+        const t = b ? (b.textContent || '').trim() : '';
+        return !!t && t !== btnText && t.includes(targetText);
+      });
+      if (outcome === 'not_confirmed') {
+        _modelBtnCache = null;
+        clog('[cfai] switch-model confirmation could not be confirmed; dismissed');
+        return SWITCH_CONFIRM_DECLINED;
+      }
+    }
+
     // Verify
     await new Promise(r => setTimeout(r, 400));
     _modelBtnCache = null;
@@ -1758,7 +1971,7 @@
     return newText !== btnText;
   }
 
-  function showRoutingToast(fromModel, toModel, ruleName) {
+  function showRoutingToast(fromModel, toModel, ruleName, title) {
     const old = document.getElementById('cfai-routing-toast');
     if (old) old.remove();
     const d = document.createElement('div');
@@ -1779,7 +1992,7 @@
       return el;
     };
 
-    d.appendChild(line('⚡ Model Routed', 'font-weight:700;margin-bottom:4px'));
+    d.appendChild(line(title || '⚡ Model Routed', 'font-weight:700;margin-bottom:4px'));
 
     const swap = document.createElement('div');
     swap.appendChild(document.createTextNode(f + ' → '));
@@ -1788,7 +2001,7 @@
     swap.appendChild(strong);
     d.appendChild(swap);
 
-    d.appendChild(line('Rule: ' + (ruleName || ''), 'font-size:11px;opacity:0.8;margin-top:4px'));
+    d.appendChild(line(ruleName ? 'Rule: ' + ruleName : 'Built-in: matched to how demanding the prompt is', 'font-size:11px;opacity:0.8;margin-top:4px'));
     d.appendChild(line('CloudFuze AI Governance', 'font-size:10px;opacity:0.6;margin-top:2px'));
 
     document.documentElement.appendChild(d);
@@ -3907,9 +4120,13 @@
       }
 
       // ── Model Routing ──
-      // 1. Try to change the model in the UI (visible to user)
-      // 2. Always set fetch-blocker backup (guarantees the API call uses the right model)
-      // 3. Pause the send → change model → re-send
+      // The decision is shared/decide-route.js (window.__cfaiRouting.decideRoute);
+      // applyRouteDecision() pauses the send only for an enforced route, switches
+      // the picker (verified by reading the tier back), sets effort where the
+      // surface has a control, reports model_routed, and re-sends. There is no
+      // fetch-level fallback: a route is a verified picker switch or a reported
+      // failure, never a silent rewrite of the request body.
+      //
       // NEVER ROUTE ON AN EMBEDDED-AI HOST. Routing pauses the event with
       // preventDefault(), then clicks around the page hunting for a model label —
       // which on a host app means hijacking that app's own buttons. Live symptom:
@@ -3917,53 +4134,12 @@
       // Routed" toast and the button did nothing, because the send was paused and
       // the router was clicking Gmail's UI looking for "GPT-4o".
       //
-      // These panels have no model picker to switch anyway: the tier tables in
-      // PLATFORM_TIERS cover dedicated AI products, not an assistant embedded in a
-      // mail client. So there is nothing to gain here and a working app to break.
+      // These panels have no model picker to switch anyway: the shared catalog
+      // covers dedicated AI products, not an assistant embedded in a mail client.
+      // So there is nothing to gain here and a working app to break.
       if (!_skipRouting && !IS_EMBEDDED_AI && isFeatureOn('model_routing')) {
-        const currentModelText = (getModelButton()?.textContent || '').trim();
-        const routing = smartRoute(currentModelText, text);
-        if (routing) {
-          // PAUSE the send
-          if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
-          clog('[cfai] SMART ROUTE:', currentModelText, '→', routing.uiName, '(' + routing.rule_name + ')');
-
-          // Set fetch-blocker backup (always works even if DOM change fails)
-          dispatchRouteModel(routing.model, routing.rule_name);
-
-          // Try DOM change, then re-send regardless
-          _weAreRouting = true;
-          changeModelInUI(routing.model).then((uiChanged) => {
-            _weAreRouting = false;
-            showRoutingToast(currentModelText, routing.uiName, routing.rule_name);
-            emit({
-              kind: 'model_routed',
-              mechanism: 'browser_extension',
-              routed_model: routing.model,
-              routed_ui_name: routing.uiName,
-              rule_name: routing.rule_name,
-              complexity: routing.complexity,
-              current_tier: routing.currentTier,
-              provider: routing.provider,
-              content_length: text.length,
-              ui_changed: uiChanged,
-            });
-
-            // Re-trigger the send
-            _skipRouting = true;
-            setTimeout(() => {
-              const target = (el && el.isConnected) ? el : findActivePromptInput();
-              if (target) {
-                target.dispatchEvent(new KeyboardEvent('keydown', {
-                  key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-                  bubbles: true, cancelable: true,
-                }));
-              }
-              setTimeout(() => { _skipRouting = false; }, 500);
-            }, 200);
-          });
-          return true;
-        }
+        const routing = routeDecisionFor(text);
+        if (routing && applyRouteDecision(routing, text, e, el)) return true;
       }
 
       // Not blocking — still log the send for governance.

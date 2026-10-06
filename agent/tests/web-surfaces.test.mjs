@@ -48,7 +48,9 @@ import {
   processesForHost,
   synthesizePlatformBlocks,
   filterBlockedAgents,
+  catalogTierLabels,
 } from '../src/os_monitor/ai-processes.js';
+import { MODEL_CATALOG } from '../src/os_monitor/model-catalog.generated.js';
 
 import { detectModelInfoFromConfig } from '../src/os_monitor/model-router-config.js';
 
@@ -1011,8 +1013,30 @@ test('AI-216: claude.ai ships ARMED, with the live-measured signature', () => {
   assert.equal(mp.provider, 'anthropic');
   assert.equal(mp.fromTier, 'button_label');
   // VERSIONED labels. 'Opus' alone would match an 'Opus 4.1' the user never
-  // chose; the version is what the boundary rule then protects.
-  assert.deepEqual(mp.tierLabels, { 3: 'Opus 5', 2: 'Sonnet 5', 1: 'Haiku 4.5' });
+  // chose; the version is what the boundary rule then protects. They come from
+  // the SHARED catalog now: Claude labels Opus/Sonnet '5.5' (live 2026-10-05),
+  // and the hand-copied 'Sonnet 5' failed every web-arm route.
+  assert.deepEqual(mp.tierLabels, { 3: 'Opus 5.5', 2: 'Sonnet 5.5', 1: 'Haiku 4.5' });
+});
+
+test('model routing: web picker click labels are the SHARED catalog\'s, never a stale copy', () => {
+  // Live 2026-10-06 (agent 1307630): claude.ai in a browser failed
+  // 'from_tier_not_confirmed_fallback_not_submitted' because this table said
+  // 'Sonnet 5' while the menu item read 'Sonnet 5.5 ...'. One source of truth.
+  for (const [id, host] of [['claude_web', 'claude.ai'], ['gemini_web', 'gemini.google.com']]) {
+    const mp = WEB_SURFACES.find((s) => s.id === id).modelPicker;
+    const tiers = MODEL_CATALOG.hosts[host].tiers;
+    assert.deepEqual(mp.tierLabels, {
+      3: tiers.premium.click_labels[0], 2: tiers.standard.click_labels[0], 1: tiers.economy.click_labels[0],
+    }, id);
+    assert.deepEqual(mp.tierLabels, catalogTierLabels(host), id);
+  }
+  // The live 2026-10 claude.ai item is matched by the standard label...
+  const claude = WEB_SURFACES.find((s) => s.id === 'claude_web').modelPicker;
+  assert.equal(modelItemNameMatches('Sonnet 5.5 Most efficient for simpler tasks', claude.tierLabels[2]), true);
+  // ...which the old hand-copied label could never do (the root cause).
+  assert.equal(modelItemNameMatches('Sonnet 5.5 Most efficient for simpler tasks', 'Sonnet 5'), false);
+  assert.deepEqual(catalogTierLabels('no-such-host.example'), { 3: '', 2: '', 1: '' });
 });
 
 test('AI-216: the picker gate reads BOTH flags, and takes the SURFACE', () => {
@@ -1040,8 +1064,8 @@ test('AI-216: the payload flattens the block, and defaults apply ONLY when it ex
   assert.equal(claude.modelPickerNamePrefix, 'Model:');
   assert.equal(claude.modelPickerControlType, 'Button');
   assert.deepEqual(claude.modelPickerItemControlTypes, ['RadioButton', 'MenuItem']);
-  assert.equal(claude.modelPickerTier3Label, 'Opus 5');
-  assert.equal(claude.modelPickerTier2Label, 'Sonnet 5');
+  assert.equal(claude.modelPickerTier3Label, 'Opus 5.5');
+  assert.equal(claude.modelPickerTier2Label, 'Sonnet 5.5');
   assert.equal(claude.modelPickerTier1Label, 'Haiku 4.5');
   assert.equal(claude.modelPickerProvider, 'anthropic');
   assert.equal(claude.modelPickerFromTier, 'button_label');

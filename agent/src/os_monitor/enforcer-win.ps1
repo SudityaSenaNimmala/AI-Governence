@@ -206,6 +206,10 @@ public static class CfaiEnforcer
     static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
     static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
     [StructLayout(LayoutKind.Sequential)]
     struct POINT { public int X; public int Y; }
     [DllImport("user32.dll")]
@@ -1679,7 +1683,13 @@ public static class CfaiEnforcer
         // it can never compute a route).
         if (modelRouterEnabled && !string.IsNullOrEmpty(modelRouterConfigJson))
         {
-            try { LoadModelRouterConfig(modelRouterConfigJson); _modelRouterEnabled = true; }
+            try
+            {
+                LoadModelRouterConfig(modelRouterConfigJson); _modelRouterEnabled = true;
+                // Loud, once: every verdict will be 'unknown' (never routed) until
+                // a config with a real lexicon arrives.
+                if (!_mrLexiconLoaded) Emit("error", "", "", "model_router_lexicon_missing", -1, -1, "model router lexicon missing; complexity verdicts are 'unknown'");
+            }
             catch (Exception ex) { Emit("error", "", "", "model_router_config_load_failed", -1, -1, ex.GetType().Name); }
         }
         // IDE panels — same "a bad payload must never take the helper down"
@@ -5138,16 +5148,6 @@ public static class CfaiEnforcer
     class TierRule { public string Provider; public string Tier; public bool IsRegex; public string Keyword; public Regex Rx; }
     class MrModelInfo { public string Provider; public string Tier; }
     class CategoryScore { public int Sum; public bool Strong; public bool Hit; }
-    class RouteDecision { public string ToTier; public string ToLabel; }
-    class ServerRoutingRule
-    {
-        public string Name;
-        public int Priority;
-        public List<string> Providers;    // null = any
-        public List<string> Complexities; // null = any
-        public string UiName;             // what to click in the dropdown
-        public string Model;              // optional: API model name
-    }
 
     // AI-216. Everything a BROWSER route needs that a desktop route does not.
     // Pinned alongside the rest of the decision and handed to RunWebRoute whole,
@@ -5176,16 +5176,162 @@ public static class CfaiEnforcer
     }
 
     static volatile bool _modelRouterEnabled = false;
-    static List<ServerRoutingRule> _mrServerRules = new List<ServerRoutingRule>();
     static List<LexCategory> _mrPositive = new List<LexCategory>();
     static LexCategory _mrSimpleTask, _mrSimplicityRequest, _mrTrivialIntent;
     static HashSet<string> _mrTrivialTokens = new HashSet<string>(StringComparer.Ordinal);
     static List<TierRule> _mrTierRules = new List<TierRule>();
-    static Dictionary<string, Dictionary<int, string>> _mrTierUiNames =
-        new Dictionary<string, Dictionary<int, string>>(StringComparer.OrdinalIgnoreCase);
     static int _mrComplexAt = 6, _mrSimpleAt = -3, _mrStrongWeight = 4, _mrCapPerCategory = 2;
     static int _mrWindowHead = 3000, _mrWindowTail = 1000, _mrMaxTrivialTokens = 4, _mrMaxFillerContentTokens = 2;
-    static readonly Regex _mrLetterRe = new Regex("\\p{L}", RegexOptions.None, REGEX_TIMEOUT);
+    // True only when a REAL lexicon arrived (every category present). The
+    // minimal config model-router-config.js sends when it cannot find the
+    // classifier source has zero categories; scoring that would turn EVERY
+    // prompt into 0 -> 'moderate' and route on it (the live "hi" on Sonnet ->
+    // noop/standard bug). Unloaded -> ClassifyComplexity returns 'unknown',
+    // which decideRoute never routes on — the same rule the desktop injector
+    // and the proxy apply when their classifier is unavailable.
+    static volatile bool _mrLexiconLoaded = false;
+    // Step 3b (pure arithmetic) and 3c (small talk) of complexity.js 1.4.0.
+    // Null when an older config carried no such block: the step is skipped.
+    static Regex _mrArithWrapper, _mrArithResidue, _mrArithHasOp, _mrArithDigit;
+    static Regex _mrSmallTalkRe, _mrSmallTalkFillerRe;
+
+    // ── JS regex semantics in .NET ──────────────────────────────────────────
+    // Every pattern here comes from complexity.js and was written for a JS
+    // engine, where \w \d \b are ASCII-only and \s is a fixed set (Unicode Zs,
+    // \t\n\v\f\r, U+2028, U+2029, U+FEFF). .NET's are Unicode-wide: "\barchitect"
+    // matched "r<e-acute>architecture" in JS and not here, an Arabic-Indic digit
+    // was a .NET \d, NEL (U+0085) was a .NET \s, U+FEFF was not.
+    //
+    // THE SHADOW. Rather than rewriting \b into lookarounds (correct, but slow
+    // enough on a 4 KB window to trip the 25 ms REGEX_TIMEOUT under load), every
+    // pattern runs against MrShadow(sample): a SAME-LENGTH copy in which every
+    // non-ASCII letter / mark / number / connector (and ZWJ, ZWNJ, NEL) is the
+    // inert U+0001 and U+FEFF is a space. On the shadow .NET's native \b \w \d
+    // \s mean exactly what JS's mean, and case-insensitive matching can only
+    // ever touch ASCII letters (JS's /i never folds a non-ASCII letter onto an
+    // ASCII one either). Because the copy is length-preserving, match INDICES
+    // are valid in the original — which is how isSmallTalk's residue keeps the
+    // real characters for its "any letter or digit left?" test.
+    //
+    // MrJsRegexToNet is left with the two operators that differ regardless of
+    // input: JS `$` (no /m) is end-of-input only, and JS `.` also excludes \r,
+    // U+2028 and U+2029. Case-insensitive patterns compile with
+    // IgnoreCase|CultureInvariant (JS's /i is culture-independent).
+    const string JS_WS = "\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff";
+    static readonly char[] JS_WS_CHARS = new char[] {
+        '\t', '\n', '\v', '\f', '\r', ' ', (char)0x00A0, (char)0x1680,
+        (char)0x2000, (char)0x2001, (char)0x2002, (char)0x2003, (char)0x2004, (char)0x2005, (char)0x2006,
+        (char)0x2007, (char)0x2008, (char)0x2009, (char)0x200A,
+        (char)0x2028, (char)0x2029, (char)0x202F, (char)0x205F, (char)0x3000, (char)0xFEFF };
+    static readonly Regex _mrJsWsRun = new Regex("[" + JS_WS + "]+", RegexOptions.None, REGEX_TIMEOUT);
+    const char MR_SHADOW_CHAR = (char)1;
+
+    static string MrShadow(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (char c in s)
+        {
+            if (c < (char)0x80) { sb.Append(c); continue; }
+            if (c == (char)0xFEFF) { sb.Append(' '); continue; }
+            if (c == (char)0x85 || c == (char)0x200C || c == (char)0x200D) { sb.Append(MR_SHADOW_CHAR); continue; }
+            switch (char.GetUnicodeCategory(c))
+            {
+                case System.Globalization.UnicodeCategory.UppercaseLetter:
+                case System.Globalization.UnicodeCategory.LowercaseLetter:
+                case System.Globalization.UnicodeCategory.TitlecaseLetter:
+                case System.Globalization.UnicodeCategory.ModifierLetter:
+                case System.Globalization.UnicodeCategory.OtherLetter:
+                case System.Globalization.UnicodeCategory.NonSpacingMark:
+                case System.Globalization.UnicodeCategory.SpacingCombiningMark:
+                case System.Globalization.UnicodeCategory.EnclosingMark:
+                case System.Globalization.UnicodeCategory.DecimalDigitNumber:
+                case System.Globalization.UnicodeCategory.LetterNumber:
+                case System.Globalization.UnicodeCategory.OtherNumber:
+                case System.Globalization.UnicodeCategory.ConnectorPunctuation:
+                    sb.Append(MR_SHADOW_CHAR); break;
+                default:
+                    sb.Append(c); break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    // String.replace(re, ' ') for a /g regex, run on the shadow, applied to the
+    // ORIGINAL characters (indices align: MrShadow is length-preserving).
+    static string MrReplaceViaShadow(Regex rx, string original, ref int count)
+    {
+        var sb = new StringBuilder(original.Length);
+        int at = 0;
+        foreach (Match m in rx.Matches(MrShadow(original)))
+        {
+            sb.Append(original, at, m.Index - at).Append(' ');
+            at = m.Index + m.Length;
+            count++;
+        }
+        sb.Append(original, at, original.Length - at);
+        return sb.ToString();
+    }
+
+    static string MrJsRegexToNet(string src, bool multiline)
+    {
+        var sb = new StringBuilder();
+        bool inClass = false;
+        for (int i = 0; i < src.Length; i++)
+        {
+            char c = src[i];
+            if (c == '\\' && i + 1 < src.Length) { sb.Append(c).Append(src[++i]); continue; }
+            if (inClass) { if (c == ']') inClass = false; sb.Append(c); continue; }
+            if (c == '[')
+            {
+                inClass = true; sb.Append(c);
+                if (i + 1 < src.Length && src[i + 1] == '^') { sb.Append('^'); i++; }
+                continue;
+            }
+            if (c == '$' && !multiline) { sb.Append("\\z"); continue; }
+            if (c == '.') { sb.Append("[^\\n\\r\\u2028\\u2029]"); continue; }
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    static Regex MrJsRegex(string source, string flags)
+    {
+        flags = flags ?? "";
+        bool multiline = flags.IndexOf('m') >= 0;
+        var opts = RegexOptions.None;
+        if (flags.IndexOf('i') >= 0) opts |= RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+        if (multiline) opts |= RegexOptions.Multiline;
+        string netSource = MrJsRegexToNet(source, multiline);
+        return new Regex(netSource, opts, REGEX_TIMEOUT);
+    }
+
+    // JS String.prototype.trim / split(/\s+/) over the JS whitespace set.
+    static string MrJsTrim(string s) { return s.Trim(JS_WS_CHARS); }
+
+    // JS /\p{L}/u (or /[\p{L}\p{N}]/u) .test(): by CODE POINT, so a letter
+    // outside the BMP counts and a lone surrogate does not.
+    static bool MrHasCodePoint(string s, bool letters, bool numbers)
+    {
+        for (int i = 0; i < s.Length; i++)
+        {
+            if ((letters && char.IsLetter(s, i)) || (numbers && char.IsNumber(s, i))) return true;
+            if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) i++;
+        }
+        return false;
+    }
+
+    // Stable descending sort by key — JS Array.prototype.sort is stable, and
+    // List<T>.Sort is not; alternation order and stem resolution order both
+    // follow it.
+    static List<T> MrStableSortDesc<T>(List<T> items, Func<T, int> key)
+    {
+        var idx = new List<int>();
+        for (int i = 0; i < items.Count; i++) idx.Add(i);
+        idx.Sort((a, b) => { int c = key(items[b]).CompareTo(key(items[a])); return c != 0 ? c : a.CompareTo(b); });
+        var o = new List<T>();
+        foreach (int i in idx) o.Add(items[i]);
+        return o;
+    }
 
     static readonly HashSet<char> _mrRegexSpecial =
         new HashSet<char> { '.', '*', '+', '?', '^', '$', '{', '}', '(', ')', '|', '[', ']', '\\' };
@@ -5226,9 +5372,9 @@ public static class CfaiEnforcer
     static LexCategory CompileLexCategory(string name, List<object> rawTerms, List<object> rawStructural)
     {
         var cat = new LexCategory { Name = name };
-        var ordered = new List<Dictionary<string, object>>();
-        foreach (var raw in rawTerms) ordered.Add((Dictionary<string, object>)raw);
-        ordered.Sort((a, b) => ((string)b["term"]).Length.CompareTo(((string)a["term"]).Length));
+        var unordered = new List<Dictionary<string, object>>();
+        foreach (var raw in rawTerms) unordered.Add((Dictionary<string, object>)raw);
+        var ordered = MrStableSortDesc(unordered, t => ((string)t["term"]).Length);
 
         var sources = new List<string>();
         foreach (var t in ordered)
@@ -5243,7 +5389,9 @@ public static class CfaiEnforcer
                 {
                     Term = term,
                     Weight = weight,
-                    StemMatch = new Regex("^" + stem + "\\w*$", RegexOptions.IgnoreCase, REGEX_TIMEOUT),
+                    // JS: new RegExp('^' + stem + '\\w*$') — no /i; the text
+                    // tested is already lower-cased.
+                    StemMatch = MrJsRegex("^" + stem + "\\w*$", ""),
                 });
             }
             else
@@ -5253,7 +5401,7 @@ public static class CfaiEnforcer
             }
         }
         string combinedSource = string.Join("|", sources);
-        cat.Combined = new Regex(combinedSource, RegexOptions.IgnoreCase, REGEX_TIMEOUT);
+        cat.Combined = MrJsRegex(combinedSource, "gi");
 
         if (rawStructural != null)
         {
@@ -5261,13 +5409,12 @@ public static class CfaiEnforcer
             {
                 var s = (Dictionary<string, object>)raw;
                 string flags = s.ContainsKey("flags") ? (string)s["flags"] : "";
-                RegexOptions opts = (flags != null && flags.IndexOf('i') >= 0) ? RegexOptions.IgnoreCase : RegexOptions.None;
                 string sigSource = (string)s["source"];
                 cat.Structural.Add(new StructSignal
                 {
                     Key = (string)s["key"],
                     Weight = Convert.ToInt32(s["weight"]),
-                    Rx = new Regex(sigSource, opts, REGEX_TIMEOUT),
+                    Rx = MrJsRegex(sigSource, flags),
                 });
             }
         }
@@ -5327,6 +5474,43 @@ public static class CfaiEnforcer
         _mrMaxTrivialTokens = Convert.ToInt32(thresholds["MAX_TRIVIAL_TOKENS"]);
         _mrMaxFillerContentTokens = Convert.ToInt32(thresholds["MAX_FILLER_CONTENT_TOKENS"]);
 
+        // Step 3b — complexity.js's ARITHMETIC_SHAPE, shipped as {source, flags}.
+        Regex aWrap = null, aRes = null, aOp = null, aDig = null;
+        var arith = DrObj(DrGet(root, "arithmetic"));
+        if (arith != null)
+        {
+            Func<string, Regex> rx = key =>
+            {
+                var o = DrObj(DrGet(arith, key));
+                return o == null ? null : MrJsRegex((string)DrGet(o, "source"), (DrGet(o, "flags") as string) ?? "");
+            };
+            aWrap = rx("wrapper"); aRes = rx("residue"); aOp = rx("hasOperator"); aDig = rx("digit");
+            if (aWrap == null || aRes == null || aOp == null || aDig == null) { aWrap = aRes = aOp = aDig = null; }
+        }
+        _mrArithWrapper = aWrap; _mrArithResidue = aRes; _mrArithHasOp = aOp; _mrArithDigit = aDig;
+
+        // Step 3c — SMALL_TALK / SMALL_TALK_FILLER, compiled exactly as
+        // complexity.js does: '\b(?:' + longest-first phraseSource()s + ')\b', /gi.
+        Regex stRe = null, stFill = null;
+        var smallTalk = DrObj(DrGet(root, "smallTalk"));
+        if (smallTalk != null)
+        {
+            Func<object, Regex> alt = raw =>
+            {
+                var list = new List<string>();
+                if (raw != null) foreach (var x in (IEnumerable)raw) { string str = x as string; if (str != null) list.Add(str); }
+                if (list.Count == 0) return null;
+                var parts = new List<string>();
+                foreach (var phrase in MrStableSortDesc(list, w => w.Length)) parts.Add(MrPhraseSource(phrase));
+                return MrJsRegex("\\b(?:" + string.Join("|", parts) + ")\\b", "gi");
+            };
+            stRe = alt(DrGet(smallTalk, "phrases"));
+            stFill = alt(DrGet(smallTalk, "filler"));
+        }
+        _mrSmallTalkRe = stRe; _mrSmallTalkFillerRe = stFill;
+
+        _mrLexiconLoaded = positive.Count > 0 && simpleTask != null && simplicityRequest != null && trivialIntent != null;
+
         var tierRules = new List<TierRule>();
         foreach (var raw in (IEnumerable)root["tierKeywordRules"])
         {
@@ -5349,44 +5533,17 @@ public static class CfaiEnforcer
         }
         _mrTierRules = tierRules;
 
-        var tierUiNames = new Dictionary<string, Dictionary<int, string>>(StringComparer.OrdinalIgnoreCase);
-        var rawTierUiNames = (Dictionary<string, object>)root["tierUiNames"];
-        foreach (var providerKv in rawTierUiNames)
-        {
-            var perTier = new Dictionary<int, string>();
-            foreach (var tierKv in (Dictionary<string, object>)providerKv.Value) perTier[int.Parse(tierKv.Key)] = (string)tierKv.Value;
-            tierUiNames[providerKv.Key] = perTier;
-        }
-        _mrTierUiNames = tierUiNames;
-
-        // Server-managed routing rules — same format as /api/v1/routing/rules.
-        // When present, ComputeRoute() checks these BEFORE the built-in logic,
-        // so admin overrides take precedence.
-        var serverRules = new List<ServerRoutingRule>();
-        if (root.ContainsKey("serverRules") && root["serverRules"] != null)
-        {
-            foreach (var raw in (IEnumerable)root["serverRules"])
-            {
-                var ruleDict = (Dictionary<string, object>)raw;
-                var sr = new ServerRoutingRule();
-                sr.Name = ruleDict.ContainsKey("name") ? (string)ruleDict["name"] : "";
-                sr.Priority = ruleDict.ContainsKey("priority") ? Convert.ToInt32(ruleDict["priority"]) : 50;
-                if (ruleDict.ContainsKey("conditions") && ruleDict["conditions"] != null)
-                {
-                    var cond = (Dictionary<string, object>)ruleDict["conditions"];
-                    sr.Providers = MrStringList(cond, "provider");
-                    sr.Complexities = MrStringList(cond, "complexity");
-                }
-                if (ruleDict.ContainsKey("action") && ruleDict["action"] != null)
-                {
-                    var act = (Dictionary<string, object>)ruleDict["action"];
-                    sr.UiName = act.ContainsKey("ui_name") ? (string)act["ui_name"] : null;
-                    sr.Model = act.ContainsKey("model") ? (string)act["model"] : null;
-                }
-                serverRules.Add(sr);
-            }
-        }
-        _mrServerRules = serverRules;
+        // The shared catalog, the routing policy and the desktop app map -- see
+        // model-router-config.js. The legacy tierUiNames / serverRules fields an
+        // older parent may still send are ignored: labels come from the catalog
+        // and rules from the policy, both read by the decideRoute port.
+        _mrCatalog = DrObj(DrGet(root, "catalog"));
+        object policy = DrGet(root, "policy");
+        _mrPolicy = (policy == null || DrObj(policy) != null || DrIsArr(policy)) ? policy : null;
+        var desktopApps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var rawApps = DrObj(DrGet(root, "desktopApps"));
+        if (rawApps != null) foreach (var kv in rawApps) { string v = kv.Value as string; if (!string.IsNullOrEmpty(v)) desktopApps[kv.Key] = v; }
+        _mrDesktopApps = desktopApps;
     }
 
     static List<string> MrStringList(Dictionary<string, object> dict, string key)
@@ -5397,6 +5554,1111 @@ public static class CfaiEnforcer
         return result.Count > 0 ? result : null;
     }
 
+    // ════ decideRoute — THE C# PORT of shared/decide-route.js ═══════════════
+    //
+    // LOCKSTEP, NOT INSPIRED-BY. Every function below is a line-for-line port
+    // of its namesake in shared/decide-route.js (Dr* = the JS name), and
+    // agent/tests/routing-decide-lockstep.test.mjs runs every case in
+    // shared/routing-decision-vectors.json (74 decisions + 24 label reads)
+    // through BOTH and compares all eleven output fields. A behaviour change
+    // there without the same change here fails that test, by design.
+    //
+    // Inputs are exactly what JavaScriptSerializer.DeserializeObject produces
+    // for the same JSON: Dictionary<string, object> for an object, object[]
+    // for an array, int/long/decimal for a number, bool, string, null. JS
+    // truthiness is ported where the source relies on it (=== false, === true,
+    // typeof 'number').
+    //
+    // ONE deliberate narrowing: label lists keep strings only (the JS keeps
+    // whatever the JSON held). A non-string label can never be clicked.
+    //
+    // PRIVACY: nothing here sees prompt text — the classifier runs first and
+    // only its verdict ('simple'/'moderate'/'complex') is passed in.
+
+    static readonly string[] DR_TIERS = new string[] { "economy", "standard", "premium" };
+    static readonly string[] DR_EFFORTS = new string[] { "low", "medium", "high" };
+    static readonly string[] DR_MODES = new string[] { "enforce", "suggest", "observe" };
+    static readonly string[] DR_SURFACES = new string[] { "browser", "desktop_app", "api_proxy" };
+
+    class DrTierEntry
+    {
+        public List<string> ClickLabels = new List<string>();
+        public List<string> ButtonPatterns = new List<string>();
+        public bool Verified;
+    }
+    class DrSurface
+    {
+        public string Key = "", Kind = "", Provider = "";
+        public bool Verified;
+        public Dictionary<string, object> Effort;   // null = { supported: false }
+        public Dictionary<string, DrTierEntry> Tiers = new Dictionary<string, DrTierEntry>(StringComparer.Ordinal);
+    }
+    class DrOverride { public string Provider, HostOrApp, Tier, Label; }
+    class DrPolicy
+    {
+        public List<Dictionary<string, object>> Rules = new List<Dictionary<string, object>>();
+        public List<object> CatalogOverrides = new List<object>();
+        public bool AllowUpgrade = true, RespectUserOverride = true, FleetEnabled = true;
+    }
+    class DrDecision
+    {
+        public string TargetTier, Effort, RuleId, RuleName, Mode, Result, Reason, FromTier, ToLabel, Model;
+        public List<string> ClickLabels = new List<string>();
+    }
+
+    static readonly Dictionary<string, object> DR_EMPTY = new Dictionary<string, object>();
+
+    static Dictionary<string, object> DrObj(object o) { return o as Dictionary<string, object>; }
+    static object DrGet(Dictionary<string, object> d, string k)
+    {
+        object v;
+        return (d != null && d.TryGetValue(k, out v)) ? v : null;
+    }
+    static bool DrIsFalse(object v) { return v is bool && !(bool)v; }
+    static bool DrIsTrue(object v) { return v is bool && (bool)v; }
+    static bool DrIsNum(object v) { return v is int || v is long || v is decimal || v is double || v is float; }
+    static bool DrIsArr(object v) { return v is object[] || v is ArrayList; }
+
+    // lower(): a trimmed, lower-cased string, or "" for anything that is not one.
+    static string DrLower(object v)
+    {
+        string s = v as string;
+        return s != null ? s.Trim().ToLowerInvariant() : "";
+    }
+
+    // asList(): undefined/null -> [], an array -> its items, anything else -> [v].
+    // NOT IEnumerable: a string and a Dictionary are both enumerable in C#.
+    static List<object> DrList(object v)
+    {
+        var o = new List<object>();
+        if (v == null) return o;
+        object[] arr = v as object[];
+        if (arr != null) { o.AddRange(arr); return o; }
+        ArrayList al = v as ArrayList;
+        if (al != null) { foreach (object x in al) o.Add(x); return o; }
+        o.Add(v);
+        return o;
+    }
+
+    static List<string> DrStrings(object v)
+    {
+        var o = new List<string>();
+        foreach (object x in DrList(v)) { string s = x as string; if (s != null) o.Add(s); }
+        return o;
+    }
+
+    static int DrTierRank(string t)
+    {
+        if (t == "economy") return 1;
+        if (t == "standard") return 2;
+        if (t == "premium") return 3;
+        return 0;
+    }
+
+    static string DrNormTier(object t)
+    {
+        if (DrIsNum(t))
+        {
+            double d = Convert.ToDouble(t, System.Globalization.CultureInfo.InvariantCulture);
+            if (d == 1) return "economy";
+            if (d == 2) return "standard";
+            if (d == 3) return "premium";
+            return null;
+        }
+        string s = DrLower(t);
+        return DrTierRank(s) > 0 ? s : null;
+    }
+
+    static string DrNormEffort(object e)
+    {
+        string s = DrLower(e);
+        return Array.IndexOf(DR_EFFORTS, s) >= 0 ? s : null;
+    }
+
+    static string DrNormSurface(object s)
+    {
+        string v = DrLower(s);
+        if (v == "desktop") return "desktop_app";
+        return Array.IndexOf(DR_SURFACES, v) >= 0 ? v : "";
+    }
+
+    static string DrNormHostOrApp(object h)
+    {
+        string v = DrLower(h);
+        return v.StartsWith("www.", StringComparison.Ordinal) ? v.Substring(4) : v;
+    }
+
+    static bool DrIsWordChar(char ch)
+    {
+        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+    }
+
+    // labelMatches(): case-insensitive, at a token boundary on BOTH sides; the
+    // char after must not be a letter, digit, '.' or '-'. Every occurrence tried.
+    static bool DrLabelMatches(string text, string label)
+    {
+        string t = text ?? "";
+        string l = label ?? "";
+        if (l.Length == 0 || t.Length < l.Length) return false;
+        string tl = t.ToLowerInvariant();
+        string ll = l.ToLowerInvariant();
+        int from = 0;
+        while (from <= tl.Length)
+        {
+            int at = tl.IndexOf(ll, from, StringComparison.Ordinal);
+            if (at < 0) return false;
+            bool okBefore = at == 0 || !DrIsWordChar(t[at - 1]);
+            int after = at + l.Length;
+            bool okAfter = after >= t.Length || !(DrIsWordChar(t[after]) || t[after] == '.' || t[after] == '-');
+            if (okBefore && okAfter) return true;
+            from = at + 1;
+        }
+        return false;
+    }
+
+    static DrTierEntry DrCopyTierEntry(object e)
+    {
+        var src = DrObj(e);
+        return new DrTierEntry
+        {
+            ClickLabels = DrStrings(DrGet(src, "click_labels")),
+            ButtonPatterns = DrStrings(DrGet(src, "button_label_patterns")),
+            Verified = DrIsTrue(DrGet(src, "verified")),
+        };
+    }
+
+    static List<string> DrPrependUnique(List<string> list, string value)
+    {
+        var o = new List<string> { value };
+        foreach (string v in list) if (DrLower(v) != DrLower(value)) o.Add(v);
+        return o;
+    }
+
+    static List<DrOverride> DrOverrideList(DrPolicy pol)
+    {
+        var o = new List<DrOverride>();
+        foreach (object raw in pol.CatalogOverrides)
+        {
+            var d = DrObj(raw);
+            if (d == null) continue;
+            string provider = DrLower(DrGet(d, "provider"));
+            string tier = DrNormTier(DrGet(d, "tier"));
+            string lbl = DrGet(d, "label") as string;
+            string label = lbl != null ? lbl.Trim() : "";
+            if (provider.Length == 0 || tier == null || label.Length == 0) continue;
+            object h = DrGet(d, "host_or_app");
+            string hoa = (h == null || (h is string && (string)h == "")) ? "*" : DrNormHostOrApp(h);
+            o.Add(new DrOverride { Provider = provider, HostOrApp = hoa, Tier = tier, Label = label });
+        }
+        return o;
+    }
+
+    static bool DrHostMatchesKey(string host, string key)
+    {
+        return host == key || (host.Length > key.Length && host.Substring(host.Length - key.Length - 1) == "." + key);
+    }
+
+    static DrSurface DrResolveSurface(Dictionary<string, object> catalog, object surface, object hostOrApp, DrPolicy pol, object providerHint)
+    {
+        var cat = catalog ?? DR_EMPTY;
+        string s = DrNormSurface(surface);
+        string hoa = DrNormHostOrApp(hostOrApp);
+        var overrides = DrOverrideList(pol);
+        string key = "";
+        string kind = "";
+        Dictionary<string, object> baseEntry = null;
+
+        if (s == "browser")
+        {
+            var hosts = DrObj(DrGet(cat, "hosts")) ?? DR_EMPTY;
+            int bestLen = 0;
+            foreach (string k in hosts.Keys)
+            {
+                string kk = DrLower(k);
+                if (DrHostMatchesKey(hoa, kk) && kk.Length > bestLen) { key = kk; bestLen = kk.Length; }
+            }
+            if (key.Length > 0)
+            {
+                kind = "host";
+                baseEntry = DrObj(DrGet(hosts, key));
+                if (baseEntry == null)
+                {
+                    foreach (string k in hosts.Keys) if (DrLower(k) == key) { baseEntry = DrObj(hosts[k]); break; }
+                }
+                if (baseEntry != null)
+                {
+                    string alias = DrGet(baseEntry, "alias_of") as string;
+                    if (!string.IsNullOrEmpty(alias)) baseEntry = DrObj(DrGet(hosts, alias));
+                }
+            }
+        }
+        else if (s == "desktop_app")
+        {
+            var apps = DrObj(DrGet(cat, "apps")) ?? DR_EMPTY;
+            foreach (string k in apps.Keys)
+            {
+                if (DrLower(k) == hoa) { key = DrLower(k); kind = "app"; baseEntry = DrObj(apps[k]); break; }
+            }
+        }
+        else if (s == "api_proxy")
+        {
+            string p = DrLower(providerHint);
+            if (p.Length == 0) return null;
+            return new DrSurface { Key = hoa.Length > 0 ? hoa : "*", Kind = "api", Provider = p, Verified = false, Effort = null };
+        }
+        else
+        {
+            return null;
+        }
+
+        var entry = new DrSurface
+        {
+            Key = key.Length > 0 ? key : hoa,
+            Kind = kind.Length > 0 ? kind : (s == "browser" ? "host" : "app"),
+            Provider = baseEntry != null ? DrLower(DrGet(baseEntry, "provider")) : "",
+            Verified = baseEntry != null && DrIsTrue(DrGet(baseEntry, "verified")),
+            Effort = baseEntry != null ? DrObj(DrGet(baseEntry, "effort")) : null,
+        };
+        var baseTiers = DrObj(DrGet(baseEntry, "tiers"));
+        if (baseTiers != null)
+        {
+            foreach (string t in DR_TIERS)
+            {
+                object te = DrGet(baseTiers, t);
+                if (te != null && !DrIsFalse(te)) entry.Tiers[t] = DrCopyTierEntry(te);
+            }
+        }
+
+        // Overrides: wildcard first, then the exact surface, so the specific one wins.
+        var exact = new List<DrOverride>();
+        var wild = new List<DrOverride>();
+        foreach (var o in overrides)
+        {
+            if (o.HostOrApp == "*") wild.Add(o);
+            else if (o.HostOrApp == hoa || (key.Length > 0 && o.HostOrApp == key)) exact.Add(o);
+        }
+        if (baseEntry == null)
+        {
+            if (exact.Count == 0) return null;
+            entry.Provider = exact[0].Provider;
+        }
+        var all = new List<DrOverride>(wild);
+        all.AddRange(exact);
+        foreach (var o in all)
+        {
+            if (o.Provider != entry.Provider) continue;
+            DrTierEntry te;
+            if (!entry.Tiers.TryGetValue(o.Tier, out te)) te = DrCopyTierEntry(null);
+            te.ClickLabels = new List<string> { o.Label };
+            te.ButtonPatterns = DrPrependUnique(te.ButtonPatterns, o.Label);
+            entry.Tiers[o.Tier] = te;
+        }
+        return entry;
+    }
+
+    // detectTierFromLabel(): longest pattern across ALL tiers first. A STABLE
+    // sort, as Array.prototype.sort is: ties keep tier order, patterns before
+    // click labels. List<T>.Sort is not stable, hence the insertion sort.
+    static string DrDetectTierFromLabel(DrSurface entry, string text)
+    {
+        if (entry == null) return null;
+        var tiers = new List<string>();
+        var pats = new List<string>();
+        foreach (string t in DR_TIERS)
+        {
+            DrTierEntry te;
+            if (!entry.Tiers.TryGetValue(t, out te)) continue;
+            var both = new List<string>(te.ButtonPatterns);
+            both.AddRange(te.ClickLabels);
+            foreach (string p in both)
+            {
+                if (string.IsNullOrEmpty(p)) continue;
+                int i = pats.Count;
+                pats.Add(p); tiers.Add(t);
+                while (i > 0 && pats[i - 1].Length < pats[i].Length)
+                {
+                    string tp = pats[i - 1]; pats[i - 1] = pats[i]; pats[i] = tp;
+                    string tt = tiers[i - 1]; tiers[i - 1] = tiers[i]; tiers[i] = tt;
+                    i--;
+                }
+            }
+        }
+        for (int i = 0; i < pats.Count; i++) if (DrLabelMatches(text, pats[i])) return tiers[i];
+        return null;
+    }
+
+    static Dictionary<string, object> DrProviderTiers(Dictionary<string, object> catalog, string provider)
+    {
+        var p = DrObj(DrGet(DrObj(DrGet(catalog, "providers")), provider ?? ""));
+        return DrObj(DrGet(p, "tiers"));
+    }
+
+    static string DrTierFromApiId(Dictionary<string, object> catalog, string provider, string model)
+    {
+        string m = DrLower(model);
+        var tiers = DrProviderTiers(catalog, provider);
+        if (m.Length == 0 || tiers == null) return null;
+        foreach (string t in DR_TIERS)
+            foreach (object id in DrList(DrGet(DrObj(DrGet(tiers, t)), "api_ids")))
+                if (DrLower(id) == m) return t;
+        return null;
+    }
+
+    static bool DrProviderTierEffortSupported(Dictionary<string, object> catalog, string provider, string tier)
+    {
+        var tiers = DrProviderTiers(catalog, provider);
+        return DrIsTrue(DrGet(DrObj(DrGet(tiers, tier ?? "")), "effort_supported"));
+    }
+
+    static string DrFirstApiId(Dictionary<string, object> catalog, string provider, string tier)
+    {
+        var ids = DrList(DrGet(DrObj(DrGet(DrProviderTiers(catalog, provider), tier ?? "")), "api_ids"));
+        return ids.Count > 0 && ids[0] != null ? Convert.ToString(ids[0], System.Globalization.CultureInfo.InvariantCulture) : null;
+    }
+
+    static DrPolicy DrNormalizePolicy(object policy)
+    {
+        bool isArr = DrIsArr(policy);
+        Dictionary<string, object> p;
+        if (isArr) { p = new Dictionary<string, object>(); p["rules"] = policy; }
+        else p = DrObj(policy) ?? DR_EMPTY;
+        var settings = DrObj(DrGet(p, "settings")) ?? DR_EMPTY;
+        var pol = new DrPolicy
+        {
+            CatalogOverrides = DrList(DrGet(p, "catalog_overrides")),
+            AllowUpgrade = !DrIsFalse(DrGet(settings, "allow_upgrade")),
+            RespectUserOverride = !DrIsFalse(DrGet(settings, "respect_user_override")),
+            FleetEnabled = !DrIsFalse(DrGet(p, "fleet_enabled")),
+        };
+        foreach (object r in DrList(DrGet(p, "rules")))
+        {
+            // typeof r === 'object' admits arrays too; an array rule has no
+            // fields at all, which an empty dictionary reproduces exactly.
+            var d = DrObj(r);
+            if (d != null) pol.Rules.Add(d);
+            else if (DrIsArr(r)) pol.Rules.Add(new Dictionary<string, object>());
+        }
+        return pol;
+    }
+
+    static bool DrIsV2Rule(Dictionary<string, object> rule)
+    {
+        var a = DrObj(DrGet(rule, "action"));
+        return a != null && DrGet(a, "type") is string;
+    }
+
+    static bool DrListIncludes(List<object> list, object value)
+    {
+        string v = DrLower(value);
+        foreach (object x in list) if (DrLower(x) == v) return true;
+        return false;
+    }
+
+    static bool DrScopeTargetMatches(object target, string hoa)
+    {
+        string t = DrNormHostOrApp(target);
+        if (t.Length == 0) return false;
+        if (t == "*") return true;
+        return hoa == t || DrHostMatchesKey(hoa, t);
+    }
+
+    class DrMatchCtx { public string Surface; public object HostOrApp; public string Provider, Complexity, CurrentTier; public object Sensitivity; }
+
+    static bool DrRuleMatches(Dictionary<string, object> rule, DrMatchCtx ctx)
+    {
+        if (rule == null || DrIsFalse(DrGet(rule, "enabled"))) return false;
+        string surface = DrNormSurface(ctx.Surface);
+        string hoa = DrNormHostOrApp(ctx.HostOrApp);
+        var c = DrObj(DrGet(rule, "conditions")) ?? DR_EMPTY;
+
+        var sens = DrList(DrGet(c, "sensitivity"));
+        if (sens.Count > 0)
+        {
+            if (surface != "api_proxy") return false;
+            if (!DrListIncludes(sens, ctx.Sensitivity)) return false;
+        }
+        var prov = DrList(DrGet(c, "provider"));
+        if (prov.Count > 0 && !DrListIncludes(prov, ctx.Provider)) return false;
+        var cx = DrList(DrGet(c, "complexity"));
+        if (cx.Count > 0 && !DrListIncludes(cx, ctx.Complexity)) return false;
+
+        if (DrIsV2Rule(rule))
+        {
+            var ct = DrList(DrGet(c, "current_tier"));
+            if (ct.Count > 0 && !DrListIncludes(ct, ctx.CurrentTier)) return false;
+            var scope = DrObj(DrGet(rule, "scope")) ?? DR_EMPTY;
+            var surfaces = new List<string>();
+            foreach (object x in DrList(DrGet(scope, "surfaces"))) surfaces.Add(DrNormSurface(x));
+            if (surfaces.Count > 0 && !surfaces.Contains(surface)) return false;
+            var targets = DrList(DrGet(scope, "hosts"));
+            targets.AddRange(DrList(DrGet(scope, "apps")));
+            if (targets.Count > 0)
+            {
+                bool any = false;
+                foreach (object t in targets) if (DrScopeTargetMatches(t, hoa)) { any = true; break; }
+                if (!any) return false;
+            }
+        }
+        else
+        {
+            // v1: conditions.host was a substring test in the old extension.
+            var hosts = DrList(DrGet(c, "host"));
+            if (hosts.Count > 0)
+            {
+                bool any = false;
+                foreach (object h in hosts)
+                {
+                    string lh = DrLower(h);
+                    if (lh.Length > 0 && hoa.IndexOf(lh, StringComparison.Ordinal) >= 0) { any = true; break; }
+                }
+                if (!any) return false;
+            }
+        }
+        return true;
+    }
+
+    // orderedRules(): enabled rules by ascending priority (default 50), ties in
+    // document order. The index tie-break makes the comparison total, so the
+    // unstable List.Sort cannot reorder equal elements.
+    static List<Dictionary<string, object>> DrOrderedRules(List<Dictionary<string, object>> rules)
+    {
+        var idx = new List<KeyValuePair<int, Dictionary<string, object>>>();
+        for (int i = 0; i < rules.Count; i++)
+            if (rules[i] != null && !DrIsFalse(DrGet(rules[i], "enabled"))) idx.Add(new KeyValuePair<int, Dictionary<string, object>>(i, rules[i]));
+        idx.Sort((a, b) =>
+        {
+            object pa0 = DrGet(a.Value, "priority"), pb0 = DrGet(b.Value, "priority");
+            double pa = DrIsNum(pa0) ? Convert.ToDouble(pa0, System.Globalization.CultureInfo.InvariantCulture) : 50;
+            double pb = DrIsNum(pb0) ? Convert.ToDouble(pb0, System.Globalization.CultureInfo.InvariantCulture) : 50;
+            if (pa != pb) return pa < pb ? -1 : 1;
+            return a.Key.CompareTo(b.Key);
+        });
+        var o = new List<Dictionary<string, object>>();
+        foreach (var kv in idx) o.Add(kv.Value);
+        return o;
+    }
+
+    static string DrRuleId(Dictionary<string, object> rule)
+    {
+        if (rule == null) return null;
+        object id = DrGet(rule, "id");
+        if (id == null) id = DrGet(rule, "_id");
+        if (id == null) return null;
+        if (id is bool) return (bool)id ? "true" : "false";
+        if (id is decimal || id is double || id is float)
+            return Convert.ToDouble(id, System.Globalization.CultureInfo.InvariantCulture).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        return Convert.ToString(id, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    static string DrRuleName(Dictionary<string, object> rule)
+    {
+        string n = DrGet(rule, "name") as string;
+        return string.IsNullOrEmpty(n) ? null : n;
+    }
+
+    static DrDecision DrResult(string result, string reason, string fromTier)
+    {
+        return new DrDecision { Result = result, Reason = reason, FromTier = fromTier };
+    }
+
+    // decideRoute(). Fixed order, pinned by the vectors: disabled -> user
+    // override -> surface -> rule/built-in -> cap -> effort -> noop -> label -> mode.
+    static DrDecision DrDecideRoute(Dictionary<string, object> ctx, object policy, Dictionary<string, object> catalog)
+    {
+        var c = ctx ?? DR_EMPTY;
+        var pol = DrNormalizePolicy(policy);
+        string surface = DrNormSurface(DrGet(c, "surface"));
+        string fromTier = DrNormTier(DrGet(c, "current_tier"));
+
+        // 1. disabled
+        if (!pol.FleetEnabled || DrIsFalse(DrGet(c, "fleet_enabled"))) return DrResult("disabled", "fleet_disabled", fromTier);
+        if (DrIsFalse(DrGet(c, "machine_enabled"))) return DrResult("disabled", "machine_disabled", fromTier);
+
+        // 2. the user put it back after we routed — leave this conversation alone
+        if (DrIsTrue(DrGet(c, "user_override")) && pol.RespectUserOverride) return DrResult("user_override", "user_override", fromTier);
+
+        // 3. surface
+        if (surface.Length == 0) return DrResult("unsupported", "unknown_surface", fromTier);
+        var entry = DrResolveSurface(catalog, surface, DrGet(c, "host_or_app"), pol, DrGet(c, "provider"));
+        if (entry == null) return DrResult("unsupported", "unknown_surface", fromTier);
+        string ctxProvider = DrLower(DrGet(c, "provider"));
+        if (ctxProvider.Length > 0 && entry.Provider.Length > 0 && ctxProvider != entry.Provider)
+            return DrResult("unsupported", "provider_mismatch", fromTier);
+        string provider = entry.Provider.Length > 0 ? entry.Provider : ctxProvider;
+        if (fromTier == null) return DrResult("unsupported", "current_tier_unknown", null);
+
+        string complexity = DrLower(DrGet(c, "complexity"));
+        string builtinTier = complexity == "simple" ? "economy" : complexity == "moderate" ? "standard" : complexity == "complex" ? "premium" : null;
+        string builtinEffort = complexity == "simple" ? "low" : complexity == "complex" ? "high" : null;
+        var matchCtx = new DrMatchCtx
+        {
+            Surface = surface, HostOrApp = DrGet(c, "host_or_app"), Provider = provider,
+            Complexity = complexity, CurrentTier = fromTier, Sensitivity = DrGet(c, "sensitivity"),
+        };
+
+        // 4. first matching rule, else built-in
+        Dictionary<string, object> rule = null;
+        foreach (var r in DrOrderedRules(pol.Rules)) { if (DrRuleMatches(r, matchCtx)) { rule = r; break; } }
+
+        string target = builtinTier;
+        string effort = builtinEffort;
+        string mode = "enforce";
+        string ruleLabel = null;
+        bool ruleLabelFirst = true;
+        string model = null;
+
+        if (rule != null)
+        {
+            var a = DrObj(DrGet(rule, "action")) ?? DR_EMPTY;
+            string ui = DrGet(a, "ui_name") as string;
+            ruleLabel = (ui != null && ui.Trim().Length > 0) ? ui.Trim() : null;
+            string mdl = DrGet(a, "model") as string;
+            model = (mdl != null && mdl.Trim().Length > 0) ? mdl.Trim() : null;
+            if (DrIsV2Rule(rule))
+            {
+                string rm = DrGet(rule, "mode") as string;
+                mode = (rm != null && Array.IndexOf(DR_MODES, rm) >= 0) ? rm : "enforce";
+                string type = (string)DrGet(a, "type");
+                string actTier = DrNormTier(DrGet(a, "target_tier"));
+                if (type == "none")
+                {
+                    var n = DrResult("noop", "rule_action_none", fromTier);
+                    n.RuleId = DrRuleId(rule); n.RuleName = DrRuleName(rule); n.Mode = mode;
+                    return n;
+                }
+                if (type == "cap_tier")
+                {
+                    target = (builtinTier != null && actTier != null)
+                        ? (DrTierRank(builtinTier) <= DrTierRank(actTier) ? builtinTier : actTier)
+                        : builtinTier;
+                }
+                else
+                {
+                    target = actTier
+                        ?? (ruleLabel != null ? DrDetectTierFromLabel(entry, ruleLabel) : null)
+                        ?? (model != null ? DrTierFromApiId(catalog, provider, model) : null)
+                        ?? builtinTier;
+                    if (type == "suggest" && mode == "enforce") mode = "suggest";
+                }
+                if (a.ContainsKey("effort")) effort = DrNormEffort(a["effort"]);
+            }
+            else
+            {
+                string labelTier = ruleLabel != null ? DrDetectTierFromLabel(entry, ruleLabel) : null;
+                if (labelTier != null) ruleLabelFirst = false;
+                target = labelTier
+                    ?? (model != null ? DrTierFromApiId(catalog, provider, model) : null)
+                    ?? builtinTier;
+            }
+        }
+
+        string rid = DrRuleId(rule);
+        string rname = rule != null ? DrRuleName(rule) : null;
+
+        if (target == null)
+        {
+            var n = DrResult("noop", "unknown_complexity", fromTier);
+            n.RuleId = rid; n.RuleName = rname; n.Mode = mode;
+            return n;
+        }
+
+        // 5. cap — only when upgrades are switched off
+        bool capped = false;
+        if (!pol.AllowUpgrade)
+        {
+            string ceiling = DrNormTier(DrGet(c, "user_tier")) ?? fromTier;
+            if (DrTierRank(target) > DrTierRank(ceiling)) { target = ceiling; capped = true; }
+        }
+
+        // 6. effort only where it can actually be set
+        bool effortCtl = entry.Effort != null && DrIsTrue(DrGet(entry.Effort, "supported"));
+        bool effortOk = surface == "api_proxy"
+            ? DrProviderTierEffortSupported(catalog, provider, target)
+            : (effortCtl && DrProviderTierEffortSupported(catalog, provider, target));
+        if (!effortOk) effort = null;
+        string currentEffort = DrNormEffort(DrGet(c, "current_effort"));
+
+        // 7. nothing to change
+        bool tierChange = target != fromTier;
+        bool effortChange = effort != null && currentEffort != null && effort != currentEffort;
+        if (!tierChange && !effortChange)
+        {
+            var n = DrResult("noop", capped ? "upgrade_not_allowed" : "already_on_target", fromTier);
+            n.TargetTier = target; n.RuleId = rid; n.RuleName = rname; n.Mode = mode;
+            return n;
+        }
+
+        // 8. label
+        var clickLabels = new List<string>();
+        if (surface != "api_proxy")
+        {
+            DrTierEntry te;
+            var catLabels = entry.Tiers.TryGetValue(target, out te) ? te.ClickLabels : new List<string>();
+            if (ruleLabel == null) clickLabels = new List<string>(catLabels);
+            else if (ruleLabelFirst) clickLabels = DrPrependUnique(catLabels, ruleLabel);
+            else
+            {
+                bool has = false;
+                foreach (string l in catLabels) if (DrLower(l) == DrLower(ruleLabel)) { has = true; break; }
+                clickLabels = new List<string>(catLabels);
+                if (!has) clickLabels.Add(ruleLabel);
+            }
+            if (tierChange && clickLabels.Count == 0)
+            {
+                var n = DrResult("unsupported", "no_label_for_tier", fromTier);
+                n.TargetTier = target; n.RuleId = rid; n.RuleName = rname; n.Mode = mode;
+                return n;
+            }
+        }
+        if (model == null) model = DrFirstApiId(catalog, provider, target);
+
+        // 9. mode
+        return new DrDecision
+        {
+            TargetTier = target,
+            Effort = effort,
+            RuleId = rid,
+            RuleName = rname,
+            Mode = mode,
+            Result = mode == "suggest" ? "suggested" : (mode == "observe" ? "observed" : "routed"),
+            Reason = !tierChange ? "effort_only" : (DrTierRank(target) > DrTierRank(fromTier) ? "upgrade" : "downgrade"),
+            FromTier = fromTier,
+            ToLabel = clickLabels.Count > 0 ? clickLabels[0] : null,
+            ClickLabels = clickLabels,
+            Model = model,
+        };
+    }
+
+    // JSON for the lockstep harness: the decision with exactly the eleven keys
+    // decideRoute() returns. Test-facing; nothing in the enforcer calls it.
+    static string DrDecideRouteJson(string ctxJson, string policyJson, string catalogJson)
+    {
+        var ser = new JavaScriptSerializer();
+        ser.MaxJsonLength = 5 * 1024 * 1024;
+        var ctx = DrObj(string.IsNullOrEmpty(ctxJson) ? null : ser.DeserializeObject(ctxJson));
+        object policy = string.IsNullOrEmpty(policyJson) ? null : ser.DeserializeObject(policyJson);
+        var catalog = DrObj(string.IsNullOrEmpty(catalogJson) ? null : ser.DeserializeObject(catalogJson));
+        var d = DrDecideRoute(ctx, policy, catalog);
+        var o = new Dictionary<string, object>();
+        o["target_tier"] = d.TargetTier; o["effort"] = d.Effort; o["rule_id"] = d.RuleId; o["rule_name"] = d.RuleName;
+        o["mode"] = d.Mode; o["result"] = d.Result; o["reason"] = d.Reason; o["from_tier"] = d.FromTier;
+        o["to_label"] = d.ToLabel; o["click_labels"] = d.ClickLabels.ToArray(); o["model"] = d.Model;
+        return ser.Serialize(o);
+    }
+
+    // Label-reading twin for the harness: resolveSurface + detectTierFromLabel.
+    static string DrDetectTierJson(string surface, string hostOrApp, string policyJson, string catalogJson, string text)
+    {
+        var ser = new JavaScriptSerializer();
+        ser.MaxJsonLength = 5 * 1024 * 1024;
+        object policy = string.IsNullOrEmpty(policyJson) ? null : ser.DeserializeObject(policyJson);
+        var catalog = DrObj(ser.DeserializeObject(catalogJson));
+        var entry = DrResolveSurface(catalog, surface, hostOrApp, DrNormalizePolicy(policy), null);
+        return entry == null ? "<no-surface>" : (DrDetectTierFromLabel(entry, text) ?? "");
+    }
+
+    // ════ The router's live state: catalog, policy, fleet flag, ownership ════
+    //
+    // _mrCatalog is the shared catalog (CFAI_MODEL_ROUTER_CONFIG.catalog) and is
+    // fixed for the helper's life. _mrPolicy is the routing policy document and
+    // is REPLACED WHOLE by {"cmd":"router_policy"} on stdin when the server's
+    // policy version moves -- one reference assignment, never a mutation, so the
+    // poll thread and a route thread always see one consistent policy.
+    static volatile Dictionary<string, object> _mrCatalog = null;
+    static volatile object _mrPolicy = null;
+    // The fleet `model_routing` switch as the agent's FeatureSync last saw it.
+    // The policy document carries its own fleet_enabled; decideRoute honours
+    // either being false.
+    static volatile bool _mrFleetEnabled = true;
+    static Dictionary<string, string> _mrDesktopApps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    // Replace the policy from a {"cmd":"router_policy","policy":...} line. The
+    // policy is the v2 document, a legacy v1 rules array, or null; anything else
+    // is refused and the previous policy stays.
+    static bool ApplyRouterPolicyLine(string line)
+    {
+        try
+        {
+            if (line == null || line.Length > 1024 * 1024) return false;
+            var ser = new JavaScriptSerializer();
+            ser.MaxJsonLength = 2 * 1024 * 1024;
+            var cmd = DrObj(ser.DeserializeObject(line));
+            if (cmd == null || !cmd.ContainsKey("policy")) return false;
+            object p = cmd["policy"];
+            if (p != null && DrObj(p) == null && !DrIsArr(p)) return false;
+            _mrPolicy = p;
+            // Every pin and dedup decision was made under the OLD policy.
+            _mrLastObservedKey = "";
+            ClearPendingRoute();
+            ClearRouteNote();
+            return true;
+        }
+        catch { return false; }
+    }
+
+    // ── Extension ownership of a browser ─────────────────────────────────────
+    //
+    // When the CloudFuze browser extension is routing in a browser, it says so
+    // every 30s (POST /cfai/routing-heartbeat on the local beacon) and the agent
+    // relays {"cmd":"routing_owner","process":"chrome","ttl_ms":N} here. Until
+    // that expires, the WEB arm stands down in that browser process -- two
+    // routers driving one picker would fight over it. The DESKTOP-APP arm is
+    // never affected.
+    const long ROUTING_OWNER_MAX_TTL_MS = 120000;
+    static readonly object _routingOwnerLock = new object();
+    static readonly Dictionary<string, long> _routingOwnedUntil = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
+    static void ApplyRoutingOwner(string process, long ttlMs)
+    {
+        if (string.IsNullOrEmpty(process) || process.Length > 64) return;
+        foreach (char ch in process) if (!(DrIsWordChar(ch) || ch == '_' || ch == '-' || ch == '.')) return;
+        if (ttlMs > ROUTING_OWNER_MAX_TTL_MS) ttlMs = ROUTING_OWNER_MAX_TTL_MS;
+        lock (_routingOwnerLock)
+        {
+            if (ttlMs <= 0) _routingOwnedUntil.Remove(process);
+            else _routingOwnedUntil[process] = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(ttlMs).Ticks;
+        }
+    }
+
+    static bool RoutingOwnedByExtension(string process)
+    {
+        if (string.IsNullOrEmpty(process)) return false;
+        string p = process.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? process.Substring(0, process.Length - 4) : process;
+        lock (_routingOwnerLock)
+        {
+            long until;
+            return _routingOwnedUntil.TryGetValue(p, out until) && DateTime.UtcNow.Ticks < until;
+        }
+    }
+
+    // ── The user's own choice, and "the user put it back" ────────────────────
+    //
+    // Per (app-or-host, provider): the tier the USER last picked. Set ONLY by a
+    // picker change this code did not make -- never by our own routes -- and
+    // seeded by the first reading (whatever was selected before we ever looked
+    // is the user's). It is the ceiling decideRoute caps at when the policy
+    // switches upgrades off.
+    //
+    // Per conversation: the tier we routed to. A user change AWAY from it is a
+    // user override -- routing stands down for that conversation (decideRoute's
+    // respect_user_override) and it is reported once. A conversation is the
+    // (host, navigation generation, window) on the web and the (app, window) on
+    // the desktop, which has no conversation id; there it also lapses after
+    // MR_OVERRIDE_TTL.
+    static readonly object _mrChoiceLock = new object();
+    static readonly Dictionary<string, string> _mrLastSeenTier = new Dictionary<string, string>(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> _mrUserTier = new Dictionary<string, string>(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> _mrOurSwitchTier = new Dictionary<string, string>(StringComparer.Ordinal);
+    static readonly Dictionary<string, long> _mrOurSwitchUntil = new Dictionary<string, long>(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> _mrRoutedTier = new Dictionary<string, string>(StringComparer.Ordinal);
+    static readonly Dictionary<string, long> _mrOverriddenUntil = new Dictionary<string, long>(StringComparer.Ordinal);
+    static readonly long MR_OUR_SWITCH_WINDOW = TimeSpan.FromSeconds(10).Ticks;
+    static readonly long MR_OVERRIDE_TTL = TimeSpan.FromMinutes(30).Ticks;
+
+    // Called by a route thread IMMEDIATELY BEFORE it selects a menu item, so the
+    // resulting picker change is recognised as ours, not the user's.
+    static void MrNoteOurSwitch(string choiceKey, string toTier)
+    {
+        if (string.IsNullOrEmpty(choiceKey) || string.IsNullOrEmpty(toTier)) return;
+        lock (_mrChoiceLock)
+        {
+            _mrOurSwitchTier[choiceKey] = toTier;
+            _mrOurSwitchUntil[choiceKey] = DateTime.UtcNow.Ticks + MR_OUR_SWITCH_WINDOW;
+        }
+    }
+
+    // Called by a route thread once the switch is VERIFIED.
+    static void MrNoteRouted(string choiceKey, string convKey, string toTier)
+    {
+        if (string.IsNullOrEmpty(convKey) || string.IsNullOrEmpty(toTier)) return;
+        lock (_mrChoiceLock)
+        {
+            _mrRoutedTier[convKey] = toTier;
+            if (!string.IsNullOrEmpty(choiceKey)) _mrLastSeenTier[choiceKey] = toTier;
+        }
+    }
+
+    // Poll thread, every tick the picker is read. Returns true exactly once per
+    // conversation: the tick the user moved the picker away from our route.
+    static bool MrTrackPicker(string choiceKey, string convKey, string curTier, out string routedTier)
+    {
+        routedTier = null;
+        if (string.IsNullOrEmpty(choiceKey) || string.IsNullOrEmpty(curTier)) return false;
+        long now = DateTime.UtcNow.Ticks;
+        lock (_mrChoiceLock)
+        {
+            string last;
+            bool had = _mrLastSeenTier.TryGetValue(choiceKey, out last);
+            _mrLastSeenTier[choiceKey] = curTier;
+            if (!had)
+            {
+                if (!_mrUserTier.ContainsKey(choiceKey)) _mrUserTier[choiceKey] = curTier;
+                return false;
+            }
+            if (last == curTier) return false;
+
+            string ours; long until;
+            if (_mrOurSwitchTier.TryGetValue(choiceKey, out ours) && ours == curTier
+                && _mrOurSwitchUntil.TryGetValue(choiceKey, out until) && now < until)
+            {
+                _mrOurSwitchTier.Remove(choiceKey);
+                _mrOurSwitchUntil.Remove(choiceKey);
+                return false;
+            }
+
+            // A change we did not make: the user's.
+            _mrUserTier[choiceKey] = curTier;
+            string routed;
+            if (!string.IsNullOrEmpty(convKey) && _mrRoutedTier.TryGetValue(convKey, out routed) && routed != curTier)
+            {
+                _mrRoutedTier.Remove(convKey);
+                _mrOverriddenUntil[convKey] = now + MR_OVERRIDE_TTL;
+                routedTier = routed;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    // Reported only where decideRoute will act on it: fleet on and the policy
+    // respecting user overrides.
+    static bool MrReportOverride()
+    {
+        var pol = DrNormalizePolicy(_mrPolicy);
+        return _mrFleetEnabled && pol.FleetEnabled && pol.RespectUserOverride;
+    }
+
+    static string MrUserTier(string choiceKey)
+    {
+        lock (_mrChoiceLock) { string t; return _mrUserTier.TryGetValue(choiceKey ?? "", out t) ? t : null; }
+    }
+
+    static bool MrConvOverridden(string convKey)
+    {
+        if (string.IsNullOrEmpty(convKey)) return false;
+        lock (_mrChoiceLock)
+        {
+            long until;
+            if (!_mrOverriddenUntil.TryGetValue(convKey, out until)) return false;
+            if (DateTime.UtcNow.Ticks < until) return true;
+            _mrOverriddenUntil.Remove(convKey);
+            return false;
+        }
+    }
+
+    static string DesktopAppKey(string process)
+    {
+        if (string.IsNullOrEmpty(process)) return null;
+        string p = process.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? process.Substring(0, process.Length - 4) : process;
+        string k;
+        return _mrDesktopApps.TryGetValue(p, out k) ? k : null;
+    }
+
+    // The tier a picker label shows, read through the SHARED CATALOG (with the
+    // policy's overrides). The keyword chain is only the fallback for a label
+    // the catalog cannot read, and only when it names the same provider.
+    static string MrTierOfLabel(string surface, string hostOrApp, string label)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        if (entry == null) return null;
+        string t = DrDetectTierFromLabel(entry, label);
+        if (t != null) return t;
+        var info = DetectModelInfo(label);
+        if (info != null && string.Equals(info.Provider, entry.Provider, StringComparison.OrdinalIgnoreCase)) return info.Tier;
+        return null;
+    }
+
+    static string MrProviderOf(string surface, string hostOrApp)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        return entry != null ? entry.Provider : "";
+    }
+
+    // Whether this surface's effort CONTROL has had a live pass. The catalog
+    // marks claude.ai and Claude Desktop effort supported but unverified, and
+    // this enforcer has no effort setter: effort is READ off the button and
+    // reported (effort_from / effort_to), never set. An effort-only decision is
+    // therefore never armed -- see MrDecideForPin.
+    static bool MrEffortVerified(string surface, string hostOrApp)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        return entry != null && entry.Effort != null && DrIsTrue(DrGet(entry.Effort, "supported")) && DrIsTrue(DrGet(entry.Effort, "verified"));
+    }
+
+    static string MrLowerEffort(string token)
+    {
+        string e = (token ?? "").Trim().ToLowerInvariant();
+        return Array.IndexOf(DR_EFFORTS, e) >= 0 ? e : null;
+    }
+
+    // Everything a pinned route carries beyond tier + label: where it is, which
+    // rule chose it, what to click, and the keys its outcome is recorded under.
+    // Identifiers and catalog values only.
+    class RouteMeta
+    {
+        public string Surface = "", HostOrApp = "", RuleId = "", Model = "", FromLabel = "";
+        public string ChoiceKey = "", ConvKey = "";
+        public List<string> ClickLabels = new List<string>();
+        public bool EffortVerified;
+    }
+
+    static RouteMeta _pendingRouteMeta = null;
+    static volatile RouteMeta _activeRouteMeta = null;
+
+    // The catalog name of a tier on this surface ("Opus 5"), for from_label.
+    static string MrCatalogLabel(string surface, string hostOrApp, string tier)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        DrTierEntry te;
+        if (entry == null || string.IsNullOrEmpty(tier) || !entry.Tiers.TryGetValue(tier, out te) || te.ClickLabels.Count == 0) return "";
+        return te.ClickLabels[0];
+    }
+
+    // EVERY catalog click label of one tier on this surface (with the policy's
+    // overrides), most specific first: ["Sonnet 5.5", "Sonnet 5", "Sonnet"].
+    // The web arm reads menu items through this -- the SAME labels the desktop
+    // arm and the extension use -- instead of the surface table's single
+    // 2026-09-22 name, which could not match "Sonnet 5.5" at the boundary and
+    // failed every claude.ai route as from_tier_not_confirmed.
+    static List<string> MrClickLabelsFor(string surface, string hostOrApp, string tier)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        DrTierEntry te;
+        if (entry == null || string.IsNullOrEmpty(tier) || !entry.Tiers.TryGetValue(tier, out te)) return new List<string>();
+        return new List<string>(te.ClickLabels);
+    }
+
+    // The click labels of EVERY tier on this surface. Used only to answer "is a
+    // model menu showing right now?" (WebMenuLooksOpen): its items exist in the
+    // UIA tree only while it is open.
+    static List<string> MrAllClickLabels(string surface, string hostOrApp)
+    {
+        var all = new List<string>();
+        foreach (string t in DR_TIERS)
+            foreach (string l in MrClickLabelsFor(surface, hostOrApp, t))
+                if (!string.IsNullOrEmpty(l) && !all.Contains(l)) all.Add(l);
+        return all;
+    }
+
+    static string RouteMetaFields(RouteMeta m)
+    {
+        if (m == null) return "";
+        var sb = new StringBuilder();
+        if (!string.IsNullOrEmpty(m.Surface)) sb.Append(",\"surface\":\"").Append(Esc(m.Surface)).Append("\"");
+        if (!string.IsNullOrEmpty(m.HostOrApp)) sb.Append(",\"host_or_app\":\"").Append(Esc(m.HostOrApp)).Append("\"");
+        if (!string.IsNullOrEmpty(m.RuleId)) sb.Append(",\"rule_id\":\"").Append(Esc(m.RuleId)).Append("\"");
+        if (!string.IsNullOrEmpty(m.Model)) sb.Append(",\"model\":\"").Append(Esc(m.Model)).Append("\"");
+        if (!string.IsNullOrEmpty(m.FromLabel)) sb.Append(",\"from_label\":\"").Append(Esc(m.FromLabel)).Append("\"");
+        return sb.ToString();
+    }
+
+    // ── The decision NOTE: a non-routing outcome, reported with the send ────
+    //
+    // A noop / suggested / observed / unsupported decision does not swallow the
+    // Enter, so it has no route thread to report it. The poll thread pre-builds
+    // the event line here and the keyboard hook's CLEAN-SEND branch writes it
+    // out (one Interlocked.Exchange and one write, the same cost as the
+    // "prompt" line it already writes) -- so the event is tied to a prompt that
+    // was actually sent, never to a draft being typed. Identifiers, tiers,
+    // catalog labels and a length only.
+    static string _routeNoteLine = null;
+
+    static void ClearRouteNote() { Interlocked.Exchange(ref _routeNoteLine, null); }
+
+    static void SetRouteNote(RouteMeta m, string process, string provider, DrDecision d, string complexity, int len, string effortFrom)
+    {
+        string json = "{\"kind\":\"route\""
+            + ",\"process\":\"" + Esc(process ?? "") + "\""
+            + BrowserHostField()
+            + ",\"provider\":\"" + Esc(provider ?? "") + "\""
+            + ",\"from_tier\":\"" + Esc(d.FromTier ?? "") + "\""
+            + ",\"to_tier\":\"" + Esc(d.TargetTier ?? "") + "\""
+            + ",\"to_label\":\"" + Esc(d.ToLabel ?? "") + "\""
+            + ",\"complexity\":\"" + Esc(complexity ?? "") + "\""
+            + (!string.IsNullOrEmpty(effortFrom) ? ",\"effort_from\":\"" + Esc(effortFrom) + "\"" : "")
+            + ",\"result\":\"" + Esc(d.Result ?? "") + "\""
+            + ",\"len\":" + len
+            + (!string.IsNullOrEmpty(d.Reason) ? ",\"reason\":\"" + Esc(d.Reason) + "\"" : "")
+            + RouteMetaFields(m)
+            + "}";
+        Interlocked.Exchange(ref _routeNoteLine, json);
+    }
+
+    // Hook thread, clean-send branch only. No UIA, no allocation beyond the
+    // write, no lock but the emit lock every Emit already takes.
+    static void EmitRouteNote()
+    {
+        string line = Interlocked.Exchange(ref _routeNoteLine, null);
+        if (line == null) return;
+        _mrLastObservedKey = "";
+        lock (_emitLock) { Console.Out.WriteLine(line); Console.Out.Flush(); }
+    }
+
+    // A user override, reported ONCE, on the poll thread, the tick it is seen.
+    static void EmitUserOverride(RouteMeta m, string process, string provider, string routedTier, string userTier)
+    {
+        string json = "{\"kind\":\"route\""
+            + ",\"process\":\"" + Esc(process ?? "") + "\""
+            + BrowserHostField()
+            + ",\"provider\":\"" + Esc(provider ?? "") + "\""
+            + ",\"from_tier\":\"" + Esc(routedTier ?? "") + "\""
+            + ",\"to_tier\":\"" + Esc(userTier ?? "") + "\""
+            + ",\"to_label\":\"\""
+            + ",\"complexity\":\"\""
+            + ",\"result\":\"user_override\""
+            + ",\"len\":-1"
+            + ",\"reason\":\"user_override\""
+            + RouteMetaFields(m)
+            + "}";
+        lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
+    }
+
+    // ONE decision for the pin, shared by the desktop and web arms. Runs the
+    // ported decideRoute and then applies the enforcer's own two refinements:
+    //   * an effort-only change is a noop -- there is no effort setter here;
+    //   * the result decides what happens to the pin and the note.
+    // Returns the decision when a route should be ARMED, else null (the pin is
+    // cleared and, where the outcome is reportable, a note is left for the send).
+    static DrDecision MrDecideForPin(RouteMeta meta, string process, string curTier, string complexity, string effortToken, int len)
+    {
+        var ctx = new Dictionary<string, object>();
+        ctx["surface"] = meta.Surface;
+        ctx["host_or_app"] = meta.HostOrApp;
+        ctx["provider"] = null;
+        ctx["current_tier"] = curTier;
+        ctx["user_tier"] = MrUserTier(meta.ChoiceKey);
+        ctx["current_effort"] = MrLowerEffort(effortToken);
+        ctx["user_override"] = MrConvOverridden(meta.ConvKey);
+        ctx["complexity"] = complexity;
+        ctx["fleet_enabled"] = _mrFleetEnabled;
+        ctx["machine_enabled"] = true;
+        var d = DrDecideRoute(ctx, _mrPolicy, _mrCatalog);
+
+        meta.RuleId = d.RuleId ?? "";
+        meta.Model = d.Model ?? "";
+        meta.FromLabel = MrCatalogLabel(meta.Surface, meta.HostOrApp, d.FromTier);
+        meta.ClickLabels = d.ClickLabels;
+        meta.EffortVerified = MrEffortVerified(meta.Surface, meta.HostOrApp);
+        string provider = MrProviderOf(meta.Surface, meta.HostOrApp);
+
+        // An effort-only change has nothing this enforcer may click: no effort
+        // setter exists here, and none of the catalog's effort controls has had
+        // a live pass. Reported as a noop rather than armed.
+        if (d.Result == "routed" && d.Reason == "effort_only")
+        {
+            d = new DrDecision { Result = "noop", Reason = meta.EffortVerified ? "effort_setter_absent" : "effort_unverified", FromTier = d.FromTier, TargetTier = d.TargetTier, RuleId = d.RuleId, Model = d.Model };
+        }
+        if (d.Result == "routed") { ClearRouteNote(); return d; }
+
+        ClearPendingRoute();
+        // disabled: the fleet or machine switch is off -- report nothing at all,
+        // indistinguishable from routing not existing. user_override: already
+        // reported once, the tick it happened.
+        if (d.Result == "disabled" || d.Result == "user_override") { ClearRouteNote(); return null; }
+        SetRouteNote(meta, process, provider, d, complexity, len, effortToken);
+        return null;
+    }
+
     // Mirrors complexity.js's scoreCategory(): match the alternation, resolve
     // each match back to its lexicon-entry IDENTITY (not the matched surface
     // form — every inflection of a stem is the SAME entry, so inflecting or
@@ -5405,9 +6667,11 @@ public static class CfaiEnforcer
     static CategoryScore ScoreLexCategory(LexCategory cat, string sample)
     {
         var hits = new Dictionary<string, int>(StringComparer.Ordinal);
+        var order = new List<string>();
         foreach (Match m in cat.Combined.Matches(sample))
         {
-            string matched = Regex.Replace(m.Value.ToLowerInvariant(), "\\s+", " ", RegexOptions.None, REGEX_TIMEOUT);
+            // JS: m[0].toLowerCase().replace(/\s+/g, ' ') — JS whitespace set.
+            string matched = _mrJsWsRun.Replace(m.Value.ToLowerInvariant(), " ");
             string term = null; int weight = 0;
             if (cat.Exact.TryGetValue(matched, out weight)) { term = matched; }
             else
@@ -5418,14 +6682,17 @@ public static class CfaiEnforcer
                 }
             }
             if (term == null || weight == 0 || hits.ContainsKey(term)) continue;
-            hits[term] = weight;
+            hits[term] = weight; order.Add(term);
         }
         foreach (var sig in cat.Structural)
         {
-            if (!hits.ContainsKey(sig.Key) && sig.Rx.IsMatch(sample)) hits[sig.Key] = sig.Weight;
+            if (!hits.ContainsKey(sig.Key) && sig.Rx.IsMatch(sample)) { hits[sig.Key] = sig.Weight; order.Add(sig.Key); }
         }
-        var weights = new List<int>(hits.Values);
-        weights.Sort((a, b) => Math.Abs(b).CompareTo(Math.Abs(a)));
+        // Insertion order, then a STABLE sort by |weight| desc — the JS Map +
+        // Array.prototype.sort it mirrors.
+        var inOrder = new List<int>();
+        foreach (var k in order) inOrder.Add(hits[k]);
+        var weights = MrStableSortDesc(inOrder, w => Math.Abs(w));
         int sum = 0; bool strong = false;
         for (int i = 0; i < weights.Count; i++)
         {
@@ -5435,15 +6702,28 @@ public static class CfaiEnforcer
         return new CategoryScore { Sum = sum, Strong = strong, Hit = hits.Count > 0 };
     }
 
+    static readonly Regex _mrNonWordChars = new Regex("[^a-z0-9']+", RegexOptions.None, REGEX_TIMEOUT);
+
+    // JS String.prototype.toLowerCase, for the only purpose it serves here:
+    // which [a-z0-9'] characters survive. The two non-ASCII code points whose
+    // lower-case form contains ASCII are the KELVIN SIGN (U+212A -> "k") and
+    // CAPITAL I WITH DOT (U+0130 -> "i" + U+0307); .NET Framework's invariant
+    // lower-casing maps neither, so "O<kelvin>ay" was "okay" in JS and not here.
+    static string MrJsLower(string s)
+    {
+        return s.Replace("\u212A", "k").Replace("\u0130", "i\u0307").ToLowerInvariant();
+    }
+
+    // Mirrors tallyTokens(): sample.split(/\s+/) over the JS whitespace set.
     static void MrTallyTokens(string sample, out int tokens, out int trivial, out int content)
     {
         tokens = 0; trivial = 0; content = 0;
-        foreach (var tok in sample.Split((char[])null, StringSplitOptions.RemoveEmptyEntries))
+        foreach (var tok in sample.Split(JS_WS_CHARS, StringSplitOptions.RemoveEmptyEntries))
         {
             tokens++;
-            string word = Regex.Replace(tok.ToLowerInvariant(), "[^a-z0-9']+", "", RegexOptions.None, REGEX_TIMEOUT);
+            string word = _mrNonWordChars.Replace(MrJsLower(tok), "");
             if (word.Length > 0 && _mrTrivialTokens.Contains(word)) trivial++;
-            else if (word.Length > 0 || _mrLetterRe.IsMatch(tok)) content++;
+            else if (word.Length > 0 || MrHasCodePoint(tok, true, false)) content++;
         }
     }
 
@@ -5462,6 +6742,31 @@ public static class CfaiEnforcer
         return trivial > content && content <= _mrMaxFillerContentTokens;
     }
 
+    // Mirrors isPureArithmetic() (step 3b, complexity.js 1.2.0+). Patterns are
+    // complexity.js's ARITHMETIC_SHAPE, shipped as data. This step was MISSING
+    // from the port until 1.4.0, so "what is 2+2" was 'simple' in the browser
+    // and 'moderate' on the desktop.
+    static bool MrIsPureArithmetic(string shadow)
+    {
+        string sample = shadow;   // every pattern below runs on the shadow
+        if (_mrArithDigit == null) return false;
+        if (!_mrArithDigit.IsMatch(sample)) return false;
+        if (!_mrArithHasOp.IsMatch(sample)) return false;
+        string residue = _mrArithWrapper.Replace(sample, " ");
+        return _mrArithResidue.IsMatch(residue);
+    }
+
+    // Mirrors isSmallTalk() (step 3c, complexity.js 1.4.0).
+    static bool MrIsSmallTalk(string sample)
+    {
+        if (_mrSmallTalkRe == null) return false;
+        string s = sample.Replace('\u2018', '\'').Replace('\u2019', '\'').Replace('\u02bc', '\'');
+        int phrases = 0, ignored = 0;
+        string residue = MrReplaceViaShadow(_mrSmallTalkRe, s, ref phrases);
+        if (_mrSmallTalkFillerRe != null) residue = MrReplaceViaShadow(_mrSmallTalkFillerRe, residue, ref ignored);
+        return phrases > 0 && !MrHasCodePoint(residue, true, true);
+    }
+
     // CPU/latency guard only, never a complexity signal — same rule
     // complexity.js's boundWindow() documents. Head + tail, not head alone,
     // because the actual ask is very often the last line under a large paste.
@@ -5471,39 +6776,71 @@ public static class CfaiEnforcer
         return text.Substring(0, _mrWindowHead) + "\n" + text.Substring(text.Length - _mrWindowTail);
     }
 
-    // Mirrors complexity.js's classify(). A classifier fault must never break
-    // anything on the caller's side, and must never silently downgrade a
-    // prompt either — 'moderate' is the safe default on any failure, same as
-    // the empty-text case.
-    static string ClassifyComplexity(string text)
+    // { verdict, rule, score } — the twin of complexity.js's classifyDetailed().
+    // Rule names are the JS ones; HasScore is false where JS reports null.
+    class MrVerdict { public string Verdict; public string Rule; public int Score; public bool HasScore; }
+
+    static MrVerdict MrV(string verdict, string rule) { return new MrVerdict { Verdict = verdict, Rule = rule }; }
+    static MrVerdict MrV(string verdict, string rule, int score) { return new MrVerdict { Verdict = verdict, Rule = rule, Score = score, HasScore = true }; }
+
+    // Mirrors complexity.js's decide(), step for step:
+    //   0  no lexicon loaded              -> 'unknown' (C# only; see _mrLexiconLoaded)
+    //   1  empty                          -> moderate
+    //   2  bound window
+    //   3  all greeting tokens            -> simple
+    //   3b pure arithmetic                -> simple
+    //   3c small talk                     -> simple
+    //   4  score; 5 simplicity request (no strong hit) -> simple; 6 thresholds.
+    // A classifier fault must never break anything on the caller's side, and
+    // must never silently downgrade a prompt either — 'moderate' on any
+    // failure, same as JS's catch.
+    static MrVerdict ClassifyComplexityDetailed(string text)
     {
+        if (!_mrLexiconLoaded) return MrV("unknown", "no_lexicon");
         try
         {
             if (text == null) text = "";
-            string trimmed = text.Trim();
-            if (trimmed.Length == 0) return "moderate";
+            string trimmed = MrJsTrim(text);
+            if (trimmed.Length == 0) return MrV("moderate", "empty");
             string sample = MrBoundWindow(trimmed);
-            if (MrIsAllTrivialTokens(sample)) return "simple";
+            if (MrIsAllTrivialTokens(sample)) return MrV("simple", "greeting");
+            string shadow = MrShadow(sample);
+            if (MrIsPureArithmetic(shadow)) return MrV("simple", "arithmetic");
+            if (MrIsSmallTalk(sample)) return MrV("simple", "small_talk");
 
             int positive = 0; bool strongHit = false;
             foreach (var cat in _mrPositive)
             {
-                var r = ScoreLexCategory(cat, sample);
+                var r = ScoreLexCategory(cat, shadow);
                 positive += r.Sum;
                 if (r.Strong) strongHit = true;
             }
-            var simpleTask = _mrSimpleTask != null ? ScoreLexCategory(_mrSimpleTask, sample) : new CategoryScore();
-            var simplicity = _mrSimplicityRequest != null ? ScoreLexCategory(_mrSimplicityRequest, sample) : new CategoryScore();
-            var trivial = _mrTrivialIntent != null ? ScoreLexCategory(_mrTrivialIntent, sample) : new CategoryScore();
+            var simpleTask = ScoreLexCategory(_mrSimpleTask, shadow);
+            var simplicity = ScoreLexCategory(_mrSimplicityRequest, shadow);
+            var trivial = ScoreLexCategory(_mrTrivialIntent, shadow);
             int negative = simpleTask.Sum + simplicity.Sum + (MrTrivialDominates(sample) ? trivial.Sum : 0);
             int score = positive + negative;
 
-            if (simplicity.Hit && !strongHit) return "simple";
-            if (score >= _mrComplexAt) return "complex";
-            if (score <= _mrSimpleAt) return "simple";
-            return "moderate";
+            if (simplicity.Hit && !strongHit) return MrV("simple", "simplicity_request", score);
+            if (score >= _mrComplexAt) return MrV("complex", "score", score);
+            if (score <= _mrSimpleAt) return MrV("simple", "score", score);
+            return MrV("moderate", "score", score);
         }
-        catch { return "moderate"; }
+        catch { return MrV("moderate", "error"); }
+    }
+
+    static string ClassifyComplexity(string text)
+    {
+        return ClassifyComplexityDetailed(text).Verdict;
+    }
+
+    // For the lockstep harness (agent/tests/complexity-lockstep.test.mjs):
+    // the same three fields complexity.js's classifyDetailed() returns.
+    static string ClassifyComplexityDetailedJson(string text)
+    {
+        var v = ClassifyComplexityDetailed(text);
+        return "{\"verdict\":\"" + v.Verdict + "\",\"rule\":\"" + v.Rule + "\",\"score\":"
+            + (v.HasScore ? v.Score.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null") + "}";
     }
 
     static MrModelInfo DetectModelInfo(string text)
@@ -5526,124 +6863,14 @@ public static class CfaiEnforcer
     }
     static string MrTierName(int num) { if (num >= 3) return "premium"; if (num == 2) return "standard"; return "economy"; }
 
-    // In-memory only, per this repo's v1 decision — resets on every helper
-    // restart (a policy update, a settings change). Mirrors content.js's
-    // _userCeiling: "the most expensive model the user manually selected;
-    // routing down never lowers it."
-    static string _mrCeilingProvider = null;
-    static string _mrCeilingTier = null;
-
-    static void UpdateCeiling(MrModelInfo current)
-    {
-        int newNum = MrTierNum(current.Tier);
-        int oldNum = _mrCeilingTier != null ? MrTierNum(_mrCeilingTier) : 0;
-        if (newNum > oldNum || _mrCeilingTier == null || _mrCeilingProvider != current.Provider)
-        {
-            _mrCeilingProvider = current.Provider; _mrCeilingTier = current.Tier;
-        }
-    }
-
-    // Mirrors content.js's smartRoute() tier arithmetic exactly (simple ->
-    // economy; complex -> at least standard, or the ceiling if higher;
-    // moderate -> standard; capped at the ceiling for anything but complex).
-    // THE TIER ARITHMETIC, extracted verbatim so the desktop and web arms can
-    // never drift apart on WHICH tier to route to. They differ only in where the
-    // menu LABEL for that tier comes from: the desktop reads the hand-ported
-    // TIER_UI_NAMES table, a web surface reads its own catalog entry.
-    //
-    // Returns the target tier NUMBER, or the current number when no move is
-    // needed -- the caller compares. Also performs the one-time ceiling seed,
-    // exactly where it happened before.
-    static int ComputeRouteTargetNum(MrModelInfo current, string complexity, out int currentNum)
-    {
-        if (_mrCeilingTier == null) { _mrCeilingProvider = current.Provider; _mrCeilingTier = current.Tier; }
-
-        // ── Built-in routing table (fallback) ─────────────────────────────
-        string ceilingTier = (_mrCeilingProvider == current.Provider) ? _mrCeilingTier : "standard";
-        int ceilingNum = MrTierNum(ceilingTier);
-        currentNum = MrTierNum(current.Tier);
-
-        int targetNum;
-        if (complexity == "simple") targetNum = 1;
-        else if (complexity == "complex") targetNum = Math.Max(ceilingNum, 2);
-        else targetNum = 2;
-        if (complexity != "complex") targetNum = Math.Min(targetNum, Math.Max(ceilingNum, 2));
-        return targetNum;
-    }
-
-    // ── Server rules (admin overrides) ────────────────────────────────────
-    //
-    // Same matching logic as the browser extension's serverRuleFor(): the first
-    // enabled rule whose provider + complexity conditions match wins, and it
-    // names a UI label to click outright rather than a tier to compute.
-    //
-    // LIFTED OUT OF ComputeRouteTargetNum, where the two branches first put it.
-    // That helper returns a tier NUMBER and is shared by the desktop and web
-    // arms precisely so they cannot drift; a server rule is not a tier number,
-    // it is a finished decision, so it has to be answered by the callers that
-    // return RouteDecision. Doing it here rather than in only ComputeRoute also
-    // means an admin override now applies to a WEB surface too, which is what
-    // an admin who wrote the rule would expect -- the desktop-only behaviour
-    // was an artifact of where the check happened to sit.
-    static string ServerRuleUiName(MrModelInfo current, string complexity)
-    {
-        foreach (var sr in _mrServerRules)
-        {
-            if (sr.Providers != null && !sr.Providers.Contains(current.Provider.ToLowerInvariant())) continue;
-            if (sr.Complexities != null && !sr.Complexities.Contains(complexity)) continue;
-            if (!string.IsNullOrEmpty(sr.UiName)) return sr.UiName;
-        }
-        return null;
-    }
-
-    static RouteDecision ComputeRoute(MrModelInfo current, string complexity)
-    {
-        string ruleLabel = ServerRuleUiName(current, complexity);
-        if (!string.IsNullOrEmpty(ruleLabel))
-            return new RouteDecision { ToTier = "server_rule", ToLabel = ruleLabel };
-        int currentNum;
-        int targetNum = ComputeRouteTargetNum(current, complexity, out currentNum);
-        if (targetNum == currentNum) return null;
-        string targetTierName = MrTierName(targetNum);
-        Dictionary<int, string> uiNames;
-        if (!_mrTierUiNames.TryGetValue(current.Provider, out uiNames)) return null;
-        string uiName;
-        if (!uiNames.TryGetValue(targetNum, out uiName)) return null;
-        return new RouteDecision { ToTier = targetTierName, ToLabel = uiName };
-    }
-
-    // AI-216. The same arithmetic, with the label taken from the SURFACE'S OWN
-    // catalog entry rather than from the shared TIER_UI_NAMES table.
-    //
-    // WHY NOT REUSE TIER_UI_NAMES: that table is the browser extension's, keyed
-    // on provider and written for the strings the extension saw ('Opus',
-    // 'Sonnet', 'Haiku'). The measured claude.ai menu carries VERSIONED labels
-    // ('Opus 5', 'Sonnet 5', 'Haiku 4.5'), and the boundary-aware matcher needs
-    // the version to be present -- matching a bare 'Opus' would happily accept
-    // an 'Opus 4.1' the user never chose. Per-surface data is also what lets a
-    // second host with different labels ship without touching code.
-    //
-    // A tier with NO LABEL on this surface returns null: nothing to search the
-    // menu for, so no route is armed. That is an ordinary outcome, not an error
-    // -- model availability is per account.
-    static RouteDecision ComputeWebRoute(MrModelInfo current, string complexity, WebPicker picker)
-    {
-        if (picker == null) return null;
-        // An admin override outranks the built-in table here too -- see
-        // ServerRuleUiName. The label is clicked in the surface's own menu, so
-        // a rule naming a model this surface does not offer simply finds
-        // nothing and no route is armed, which is the same ordinary outcome as
-        // a tier with no label.
-        string ruleLabel = ServerRuleUiName(current, complexity);
-        if (!string.IsNullOrEmpty(ruleLabel))
-            return new RouteDecision { ToTier = "server_rule", ToLabel = ruleLabel };
-        int currentNum;
-        int targetNum = ComputeRouteTargetNum(current, complexity, out currentNum);
-        if (targetNum == currentNum) return null;
-        string uiName = WebPickerTierLabel(picker, targetNum);
-        if (string.IsNullOrEmpty(uiName)) return null;
-        return new RouteDecision { ToTier = MrTierName(targetNum), ToLabel = uiName };
-    }
+    // The old in-memory ceiling ratchet (UpdateCeiling), the hand-ported tier
+    // arithmetic (ComputeRouteTargetNum) and the two label tables it fed
+    // (ComputeRoute / ComputeWebRoute, ServerRuleUiName) are GONE. They returned
+    // a server rule's label before any tier arithmetic -- so a rule naming the
+    // tier the picker was already on still armed a route and opened the picker --
+    // and the ceiling was raised by our OWN routes. Both answers now come from
+    // the decideRoute port above (DrDecideRoute via MrDecideForPin) and the
+    // user-choice tracking beside it (MrTrackPicker).
 
     // ---- AI-216: the model picker's signature, as NAMED DEFAULTS ----------
     //
@@ -5911,6 +7138,7 @@ public static class CfaiEnforcer
             + ",\"result\":\"" + Esc(result) + "\""
             + ",\"len\":" + len
             + (!string.IsNullOrEmpty(reason) ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
+            + RouteMetaFields(_activeRouteMeta)
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -5930,6 +7158,10 @@ public static class CfaiEnforcer
     static string _pendingRouteFromTier = "", _pendingRouteToTier = "", _pendingRouteToLabel = "", _pendingRouteProvider = "", _pendingRouteComplexity = "";
     static string _pendingRouteOriginalText = "";
     static int[] _pendingRouteComposerRid = null;
+    // DESKTOP only: the live composer reference the poll thread read the pin
+    // from. Lets a failed route put focus BACK on the composer (focus is in the
+    // model menu after any picker interaction) instead of giving up.
+    static AutomationElement _pendingRouteComposerEl = null;
     static IntPtr _pendingRouteHwnd = IntPtr.Zero;
     static long _pendingRouteExpiresAt = 0;
     static readonly long ROUTE_TTL = TimeSpan.FromSeconds(15).Ticks;
@@ -5940,6 +7172,33 @@ public static class CfaiEnforcer
 
     static volatile bool _routeInProgress = false;
     static volatile bool _routeAbort = false;
+    // The window the running route was pinned to. Read by the keyboard hook
+    // (one compare against GetForegroundWindow, no UIA) to decide whether an
+    // Enter pressed DURING a route belongs to it -- see RouteHookSwallowsEnter.
+    static IntPtr _activeRouteHwnd = IntPtr.Zero;
+
+    // Poll thread, on the desktop arm's dedup early-return. Same prompt, same
+    // picker label, so the decision is unchanged -- but the pin must stay FRESH:
+    //   * Claude Desktop re-renders its composer while the prompt sits there,
+    //     so the RuntimeId captured on the first tick dies and Enter used to
+    //     fail 'element_changed';
+    //   * the TTL was set once, so a prompt left untouched for 15s expired and
+    //     its Enter was eaten.
+    // The route id is NOT rotated (StartRoute would no-op on the mismatch), and
+    // nothing is refreshed unless the armed pin is for THIS text in THIS window.
+    static void MrRefreshPinOnDedup(string text, int[] composerRid, AutomationElement el, IntPtr hwnd)
+    {
+        if (composerRid == null || string.IsNullOrEmpty(text)) return;
+        lock (_routeLock)
+        {
+            if (!_pendingRouteArmed || _pendingRouteCtx != null) return;
+            if (!string.Equals(_pendingRouteOriginalText, text, StringComparison.Ordinal)) return;
+            if (_pendingRouteHwnd != hwnd) return;
+            _pendingRouteComposerRid = composerRid;
+            if (el != null) _pendingRouteComposerEl = el;
+            _pendingRouteExpiresAt = DateTime.UtcNow.Ticks + ROUTE_TTL;
+        }
+    }
 
     static void UpdateModelRouting()
     {
@@ -6005,6 +7264,13 @@ public static class CfaiEnforcer
                 || _fgWebChromeFocused || _fgWebPasswordFocused)
             { ClearPendingRoute(); return; }
 
+            // EXTENSION-OWNED BROWSER. The CloudFuze extension in this browser
+            // has said (routing heartbeat, relayed by the agent) that IT routes
+            // here. Two routers driving one picker would fight, so the web arm
+            // stands down for this browser process until the ownership lapses.
+            // The desktop-app arm below is never affected.
+            if (RoutingOwnedByExtension(_app)) { ClearPendingRoute(); return; }
+
             // The SAME precedence the desktop arm applies, in the same order:
             // a block always wins, and a live Tokenize & Send offer must never
             // be disturbed.
@@ -6044,7 +7310,9 @@ public static class CfaiEnforcer
         if (el == null) return;
         string text = null;
         try { text = ReadText(el); } catch { }
-        if (string.IsNullOrEmpty(text)) return;
+        // An empty composer has nothing to send: drop any note left for a
+        // previous prompt so it cannot ride out on an unrelated Enter.
+        if (string.IsNullOrEmpty(text)) { ClearRouteNote(); return; }
         int[] composerRid = null;
         try { composerRid = el.GetRuntimeId(); } catch { }
         if (composerRid == null) return;
@@ -6064,19 +7332,41 @@ public static class CfaiEnforcer
         try { label = picker.Current.Name; } catch { _mrCachedPicker = null; return; }
         if (string.IsNullOrEmpty(label)) return;
 
-        var current = DetectModelInfo(label);
-        if (current == null) return;
-        UpdateCeiling(current);
+        // WHICH APP, in catalog terms. A process with no catalog app gets
+        // unsupported/unknown_surface from the decision and nothing is armed.
+        string appKey = DesktopAppKey(_app) ?? (_app ?? "");
+        string curTier = MrTierOfLabel("desktop_app", appKey, label);
+        string provider = MrProviderOf("desktop_app", appKey);
+        var meta = new RouteMeta
+        {
+            Surface = "desktop_app",
+            HostOrApp = appKey,
+            ChoiceKey = "desktop_app|" + appKey + "|" + provider,
+            ConvKey = "desktop_app|" + appKey + "|" + fg.ToInt64(),
+        };
+        // Every reading, before the dedup: a picker change the user made must be
+        // seen even when the prompt did not change.
+        string overriddenFrom;
+        if (MrTrackPicker(meta.ChoiceKey, meta.ConvKey, curTier, out overriddenFrom))
+        {
+            ClearPendingRoute();
+            if (MrReportOverride()) EmitUserOverride(meta, _app, provider, overriddenFrom, curTier);
+        }
 
         // Dedup against the poll thread's own ~150ms cadence — nothing about
         // the prompt or the picker changed, so there is nothing new to compute.
         string dedupKey = NormalizeWs(text) + "|" + label;
-        if (dedupKey == _mrLastObservedKey) return;
+        if (dedupKey == _mrLastObservedKey) { MrRefreshPinOnDedup(text, composerRid, el, fg); return; }
         _mrLastObservedKey = dedupKey;
 
         string complexity = ClassifyComplexity(text);
-        var decision = ComputeRoute(current, complexity);
-        if (decision == null) { ClearPendingRoute(); return; }   // already at the right tier
+        string effortFrom = ModelEffortFromLabel(label, MODEL_PICKER_NAME_PREFIX_DEFAULT);
+        // THE NO-OP FIX. The decision is the shared decideRoute (C# port): a
+        // rule or the built-in table names a TIER, and a tier the picker is
+        // already on is noop/already_on_target -- nothing is armed, so Enter
+        // passes straight through and the picker is never opened.
+        var decision = MrDecideForPin(meta, _app, curTier, complexity, effortFrom, text.Length);
+        if (decision == null) return;
 
         lock (_routeLock)
         {
@@ -6086,18 +7376,20 @@ public static class CfaiEnforcer
             // fire on the very next Enter would make StartRoute silently
             // no-op on the mismatch.
             bool samePrompt = _pendingRouteArmed && _pendingRouteOriginalText == text
-                && string.Equals(_pendingRouteToLabel, decision.ToLabel, StringComparison.Ordinal);
+                && string.Equals(_pendingRouteToLabel, decision.ToLabel ?? "", StringComparison.Ordinal);
             if (!samePrompt) _pendingRouteId = Guid.NewGuid().ToString("N");
             _pendingRouteArmed = true;
-            _pendingRouteFromTier = current.Tier;
-            _pendingRouteToTier = decision.ToTier;
-            _pendingRouteToLabel = decision.ToLabel;
-            _pendingRouteProvider = current.Provider;
+            _pendingRouteFromTier = curTier;
+            _pendingRouteToTier = decision.TargetTier;
+            _pendingRouteToLabel = decision.ToLabel ?? "";
+            _pendingRouteProvider = provider;
             _pendingRouteComplexity = complexity;
             _pendingRouteOriginalText = text;
             _pendingRouteComposerRid = composerRid;
             _pendingRouteHwnd = fg;
             _pendingRouteExpiresAt = DateTime.UtcNow.Ticks + ROUTE_TTL;
+            _pendingRouteMeta = meta;
+            _pendingRouteComposerEl = el;
             // NULL, which is what makes StartRoute dispatch to RunRoute and
             // leaves the desktop route the code it has always been.
             _pendingRouteCtx = null;
@@ -6156,23 +7448,39 @@ public static class CfaiEnforcer
         // both read as economy and a user on Flash could never be routed down.
         // A surface with no button table (claude.ai) resolves 0 here and takes
         // the chain exactly as before.
-        MrModelInfo current;
-        int buttonTierNum = ResolveButtonTier(label, webPicker);
-        if (buttonTierNum > 0)
+        // THE SHARED CATALOG READS THE BUTTON, through the decideRoute port's
+        // own label matcher (longest pattern first, token boundaries on both
+        // sides -- 'Flash' can never swallow 'Flash-Lite'). The surface's
+        // button table (ResolveButtonTier) and the keyword chain are fallbacks
+        // only. On gemini.google.com the chain alone reads 'currently Flash' as
+        // economy, which is exactly the misreading this replaces.
+        string webHost = _fgWebHost ?? "";
+        string curTier = MrTierOfLabel("browser", webHost, label);
+        if (curTier == null)
         {
-            current = new MrModelInfo { Provider = webPicker.Provider, Tier = MrTierName(buttonTierNum) };
+            int buttonTierNum = ResolveButtonTier(label, webPicker);
+            if (buttonTierNum > 0) curTier = MrTierName(buttonTierNum);
         }
-        else
-        {
-            current = DetectModelInfo(label);
-        }
-        if (current == null) { ClearPendingRoute(); return; }
-        // The catalog STATES which provider's tier arithmetic applies here, so a
-        // page that turns out to be showing another vendor's model refuses
-        // rather than routing through the wrong tier table.
-        if (!string.Equals(current.Provider, webPicker.Provider, StringComparison.OrdinalIgnoreCase))
+        // The surface catalog STATES which provider this page is; a shared
+        // catalog that disagrees refuses rather than routing through the wrong
+        // tier table.
+        string provider = MrProviderOf("browser", webHost);
+        if (provider.Length == 0) provider = webPicker.Provider ?? "";
+        if (!string.Equals(provider, webPicker.Provider, StringComparison.OrdinalIgnoreCase))
         { ClearPendingRoute(); return; }
-        UpdateCeiling(current);
+        var meta = new RouteMeta
+        {
+            Surface = "browser",
+            HostOrApp = webHost,
+            ChoiceKey = "browser|" + webHost + "|" + provider,
+            ConvKey = "browser|" + webHost + "|" + _browserNavGen + "|" + fg.ToInt64(),
+        };
+        string overriddenFrom;
+        if (MrTrackPicker(meta.ChoiceKey, meta.ConvKey, curTier, out overriddenFrom))
+        {
+            ClearPendingRoute();
+            if (MrReportOverride()) EmitUserOverride(meta, _app, provider, overriddenFrom, curTier);
+        }
 
         // THE ONE DOOR. Never AutomationElement.FocusedElement -- on a browser
         // that is whatever text box has the caret. The element this returns is
@@ -6213,22 +7521,24 @@ public static class CfaiEnforcer
         _mrLastObservedKey = dedupKey;
 
         string complexity = ClassifyComplexity(text);
-        var decision = ComputeWebRoute(current, complexity, webPicker);
-        // null means EITHER already at the right tier OR this surface lists no
-        // label for the target tier. The second is an ordinary runtime outcome,
-        // not an error: model availability is per account.
-        if (decision == null) { ClearPendingRoute(); return; }
+        string effortFrom = ModelEffortFromLabel(label, webPicker.NamePrefix);
+        // The shared decision (decideRoute port). Anything but 'routed' clears
+        // the pin; noop -- including already-on-target -- arms nothing, so the
+        // picker is never opened for it.
+        var decision = MrDecideForPin(meta, _app, curTier, complexity, effortFrom, text.Length);
+        if (decision == null) return;
 
         lock (_routeLock)
         {
             bool samePrompt = _pendingRouteArmed && _pendingRouteOriginalText == text
-                && string.Equals(_pendingRouteToLabel, decision.ToLabel, StringComparison.Ordinal);
+                && string.Equals(_pendingRouteToLabel, decision.ToLabel ?? "", StringComparison.Ordinal);
             if (!samePrompt) _pendingRouteId = Guid.NewGuid().ToString("N");
             _pendingRouteArmed = true;
-            _pendingRouteFromTier = current.Tier;
-            _pendingRouteToTier = decision.ToTier;
-            _pendingRouteToLabel = decision.ToLabel;
-            _pendingRouteProvider = current.Provider;
+            _pendingRouteFromTier = curTier;
+            _pendingRouteToTier = decision.TargetTier;
+            _pendingRouteToLabel = decision.ToLabel ?? "";
+            _pendingRouteProvider = provider;
+            _pendingRouteMeta = meta;
             _pendingRouteComplexity = complexity;
             _pendingRouteOriginalText = text;
             _pendingRouteComposerRid = composerRid;
@@ -6250,7 +7560,8 @@ public static class CfaiEnforcer
 
     static void ClearPendingRoute()
     {
-        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; }
+        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; _pendingRouteMeta = null; _pendingRouteComposerEl = null; }
+        ClearRouteNote();
     }
 
     // Locates every currently-visible model-choice item in the foreground
@@ -6315,6 +7626,20 @@ public static class CfaiEnforcer
             }
         }
         catch { }
+        return null;
+    }
+
+    // The catalog's click labels, most specific first: the first label any
+    // menu item answers to wins. Same first-match item test as before, per label.
+    static AutomationElement FindMenuItemByLabels(AutomationElement win, List<string> labels)
+    {
+        if (win == null || labels == null) return null;
+        foreach (string label in labels)
+        {
+            if (string.IsNullOrEmpty(label)) continue;
+            AutomationElement el = FindMenuItemByLabel(win, label);
+            if (el != null) return el;
+        }
         return null;
     }
 
@@ -6383,28 +7708,46 @@ public static class CfaiEnforcer
         catch { }
     }
 
-    static void StartRoute(string routeId)
+    // Hook thread. Returns TRUE when this Enter now belongs to a route (the hook
+    // swallows it; the route thread sends the prompt itself), FALSE when it does
+    // not (the hook lets it through as an ordinary, unrouted send). An Enter is
+    // never swallowed unless something owns re-sending it.
+    static bool StartRoute(string routeId)
     {
-        // Every rejection is reported, mirroring StartRewrite — a swallowed
-        // Enter that produces no visible outcome at all is indistinguishable
-        // from a hang.
-        if (_routeInProgress || _rewriteInProgress) { EmitRoute(_app, "", "", "", "", "", "aborted", -1, "route_or_rewrite_already_in_progress"); return; }
-        if (string.IsNullOrEmpty(routeId)) return;
+        // A second Enter (or Windows key-repeat on a held one) WHILE a route or
+        // rewrite runs: that run owns the prompt and reports its own outcome.
+        // Swallowed so it cannot land in the open model menu (where Enter
+        // activates the highlighted item) or double-send, and SILENT -- this
+        // used to emit an 'aborted' route event with every tier and the
+        // complexity empty, which is the malformed live event.
+        if (_routeInProgress || _rewriteInProgress) return true;
+        if (string.IsNullOrEmpty(routeId)) return false;
         string fromTier, toTier, toLabel, provider, complexity, originalText;
-        int[] composerRid; IntPtr hwnd; long expiresAt; RouteCtx ctx;
+        int[] composerRid; IntPtr hwnd; long expiresAt; RouteCtx ctx; RouteMeta meta; AutomationElement composerEl;
         lock (_routeLock)
         {
-            if (_pendingRouteId != routeId || !_pendingRouteArmed) { EmitRoute(_app, "", "", "", "", "", "aborted", -1, "stale_route_id"); return; }
+            // The pin rotated between the hook's read and here: an internal
+            // race, not a route outcome. The Enter goes through untouched.
+            if (_pendingRouteId != routeId || !_pendingRouteArmed) return false;
             fromTier = _pendingRouteFromTier; toTier = _pendingRouteToTier; toLabel = _pendingRouteToLabel;
             provider = _pendingRouteProvider; complexity = _pendingRouteComplexity;
             originalText = _pendingRouteOriginalText; composerRid = _pendingRouteComposerRid;
             hwnd = _pendingRouteHwnd; expiresAt = _pendingRouteExpiresAt;
             ctx = _pendingRouteCtx;
+            meta = _pendingRouteMeta;
+            composerEl = _pendingRouteComposerEl;
         }
-        if (DateTime.UtcNow.Ticks > expiresAt) { ClearPendingRoute(); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, "expired", ctx != null ? ctx.EffortFrom : null); return; }
+        // Expired: reported, and the Enter is let THROUGH as an ordinary send.
+        // It used to be swallowed here with nothing re-sending it -- the prompt
+        // just sat in the composer until the user pressed Enter again.
+        if (DateTime.UtcNow.Ticks > expiresAt) { ClearPendingRoute(); EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, "expired", ctx != null ? ctx.EffortFrom : null); return false; }
 
+        _activeRouteHwnd = hwnd;
         _routeInProgress = true;
         _routeAbort = false;
+        // Read by EmitRoute for the duration of THIS route only (cleared in the
+        // route thread's finally). One route at a time: _routeInProgress.
+        _activeRouteMeta = meta;
         // AI-216. A SINGLE NULL TEST decides which route runs, and the desktop
         // branch is literally the call it always was. The web route is a
         // SEPARATE function rather than a set of `if (isWeb)` branches threaded
@@ -6422,11 +7765,689 @@ public static class CfaiEnforcer
         }
         else
         {
-            t = new Thread(() => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd));
+            AutomationElement ce = composerEl;
+            t = new Thread(() => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, ce));
         }
         t.IsBackground = true;
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
+        return true;
+    }
+
+    // ── Desktop route recovery: the PURE verdicts ────────────────────────────
+    // Pure so tests/helpers/desktop-route-recovery-harness.ps1 drives them with
+    // the values the live Claude Desktop run produced; RunRoute and
+    // FallbackSendOrReport only feed them UIA reads.
+
+    // Is the candidate element the user's composer, holding the user's prompt?
+    // null = yes. Otherwise the reason, named for what it actually is:
+    //   text_changed          the SAME element, different text: the user edited
+    //                         (or emptied) the prompt. Never sent, never "fixed".
+    //   focus_not_in_composer focus is on a non-text control -- after any picker
+    //                         interaction it sits in the model menu. Recoverable
+    //                         by putting focus back.
+    //   element_changed       another text box, with other text.
+    //   no_element            nothing identifiable.
+    // A DIFFERENT element holding the SAME prompt (after whitespace / zero-width
+    // normalization) IS the composer: Claude Desktop re-renders it, and its
+    // RuntimeId goes with the re-render. The AutomationId cannot be used to
+    // re-identify it -- on Claude it is a React render counter (see the
+    // modelPicker notes in ai-processes.js). Before this, a RuntimeId mismatch
+    // alone failed the route and was reported as "text_changed".
+    static string RouteComposerVerdict(int[] pinnedRid, int[] curRid, string pinnedText, string curText, bool curEditable)
+    {
+        string want = NormalizeWs(pinnedText);
+        string have = NormalizeWs(curText);
+        bool sameText = want.Length > 0 && have == want;
+        if (curRid != null && RuntimeIdEquals(curRid, pinnedRid)) return sameText ? null : "text_changed";
+        if (!curEditable) return "focus_not_in_composer";
+        if (curRid == null) return "no_element";
+        return sameText ? null : "element_changed";
+    }
+
+    // Did the picker switch to the target? By TIER where the catalog can read
+    // the label (an effort token changing on its own is not a switch); a label
+    // the catalog cannot read falls back to "it changed at all".
+    static bool RouteSwitchVerified(string afterTier, string toTier, string labelAfter, string labelBefore)
+    {
+        if (string.IsNullOrEmpty(labelAfter)) return false;
+        if (afterTier != null) return string.Equals(afterTier, toTier, StringComparison.Ordinal);
+        return !string.Equals(labelAfter, labelBefore, StringComparison.Ordinal);
+    }
+
+    // ── Claude's own "Switch model?" confirmation ──────────────────────────
+    //
+    // Live 2026-10-05 (Claude Desktop, an EXISTING conversation on "Opus 5.5
+    // Medium"): selecting Sonnet in the picker does not switch. Claude opens its
+    // own modal -- "Switch model?" / "...This task is cached for the current
+    // model..." -- with "Cancel" and "Switch to Sonnet 5.5" (focused). The route
+    // then failed switch_not_verified_no_fallback_focus_not_in_composer: focus
+    // was in the dialog, nothing was sent. New conversations show no dialog.
+    //
+    // The user's requirement is that routing switches AUTOMATICALLY, so after
+    // the select the verify poll also looks (bounded) for that dialog and
+    // Invokes its "Switch to <target>" button -- never Cancel. A dialog that
+    // cannot be confirmed (no button naming the target, or confirming does not
+    // land) is DISMISSED (its Cancel, else Escape) so the fallback can put focus
+    // back on the composer and send the prompt once, unrouted.
+    //
+    // The signature is catalog data (apps.<app>.confirm_dialog), so only a
+    // surface that declares it ever has this probe run -- claude_desktop today.
+    class RouteConfirmCfg
+    {
+        public string TitleContains = "", ButtonPrefix = "", CancelName = "";
+    }
+
+    // What one probe of the window saw: every Button whose Name starts with the
+    // catalog prefix (at a word boundary), and whether a dialog-shaped element
+    // carried the catalog title. Names only; nothing here is prompt text.
+    class RouteConfirmSeen
+    {
+        public bool Title;
+        public List<string> Buttons = new List<string>();
+    }
+
+    // Everything the switch-wait touches outside itself, injected so the REAL
+    // loop can be driven by the harness with a scripted dialog and a fake clock.
+    class RouteSwitchIo
+    {
+        public Func<string> ReadLabel;                 // the picker label now (re-finds it as needed)
+        public Func<string, string> TierOf;            // label -> tier, through the catalog
+        public Action RetryActivate;                   // Invoke() the target menu item again
+        public Func<RouteConfirmSeen> ProbeConfirm;    // the confirm dialog, if one is up
+        public Func<string, bool> InvokeConfirm;       // activate the button with this Name
+        public Action DismissConfirm;                  // its Cancel, else Escape
+        public Func<long> NowMs;
+        public Action<int> Sleep;
+    }
+
+    class RouteSwitchOutcome
+    {
+        public bool Switched;
+        public string LabelAfter;
+        public string Reason;          // null when Switched
+        public bool DialogSeen;
+        public int ConfirmInvokes, Dismissals, Retries;
+    }
+
+    const int ROUTE_VERIFY_MS = 2500;            // the poll, as before
+    const int ROUTE_RETRY_INVOKE_MS = 500;       // Select() -> Invoke() retry, as before
+    const int ROUTE_CONFIRM_APPEAR_MS = 1500;    // how long a dialog is looked for at all
+    const int ROUTE_CONFIRM_SETTLE_MS = 1500;    // after confirming: time for the switch to land
+    const int ROUTE_CONFIRM_PROBE_MS = 150;      // a probe is a tree walk: throttled
+    const int ROUTE_CONFIRM_REINVOKE_MS = 600;
+    const int ROUTE_CONFIRM_MAX_INVOKES = 2;
+
+    // The catalog's confirm-dialog signature for a surface, or null: a DESKTOP
+    // app (catalog.apps.<app>) or a BROWSER host (catalog.hosts.<host>). The web
+    // arm runs the same RouteAwaitSwitch as the desktop arm, so claude.ai -- the
+    // same web app Claude Desktop renders, with the same "Switch model?" modal --
+    // gets the same auto-confirm. A host without the block (gemini) is never
+    // probed.
+    static RouteConfirmCfg MrConfirmDialogCfg(string surface, string hostOrApp)
+    {
+        string bucket;
+        if (string.Equals(surface, "desktop_app", StringComparison.Ordinal)) bucket = "apps";
+        else if (string.Equals(surface, "browser", StringComparison.Ordinal)) bucket = "hosts";
+        else return null;
+        var apps = DrObj(DrGet(_mrCatalog, bucket));
+        if (apps == null) return null;
+        Dictionary<string, object> app = null;
+        if (bucket == "hosts")
+        {
+            // The same host rule decideRoute's port uses (exact or dot-suffix,
+            // longest key wins), so the dialog and the tiers come from ONE entry.
+            string hoa = DrNormHostOrApp(hostOrApp);
+            int bestLen = 0;
+            foreach (string k in apps.Keys)
+            {
+                string kk = DrLower(k);
+                if (DrHostMatchesKey(hoa, kk) && kk.Length > bestLen) { app = DrObj(apps[k]); bestLen = kk.Length; }
+            }
+        }
+        else
+        {
+            string want = DrLower(hostOrApp);
+            foreach (string k in apps.Keys) if (DrLower(k) == want) { app = DrObj(apps[k]); break; }
+        }
+        var cd = DrObj(DrGet(app, "confirm_dialog"));
+        if (cd == null) return null;
+        string prefix = DrGet(cd, "button_name_prefix") as string;
+        if (prefix == null || prefix.Trim().Length == 0) return null;
+        return new RouteConfirmCfg
+        {
+            TitleContains = ((DrGet(cd, "title_contains") as string) ?? "").Trim(),
+            ButtonPrefix = prefix,
+            CancelName = ((DrGet(cd, "cancel_button_name") as string) ?? "").Trim(),
+        };
+    }
+
+    // Does a Button Name start with the catalog prefix at a word boundary?
+    // ("Switch to Sonnet 5.5" yes; "Switch toolbar" no.)
+    static bool RouteConfirmHasPrefix(string name, string prefix)
+    {
+        if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(prefix)) return false;
+        string n = name.Trim();
+        string pf = prefix.Trim();
+        if (pf.Length == 0 || n.Length <= pf.Length) return false;
+        if (!n.StartsWith(pf, StringComparison.OrdinalIgnoreCase)) return false;
+        return char.IsWhiteSpace(n[pf.Length]);
+    }
+
+    // The family word of a click label ("Sonnet 5.5" -> "Sonnet"), or null when
+    // the first token is not a plain word of 3+ letters ("3.8 Flash").
+    static string RouteLabelFamily(string label)
+    {
+        string[] parts = (label ?? "").Trim().Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0 || parts[0].Length < 3) return null;
+        foreach (char ch in parts[0]) if (!char.IsLetter(ch)) return null;
+        return parts[0];
+    }
+
+    // Is this the "Switch to <TARGET>" button? The remainder after the prefix
+    // must name the target: one of the route's click labels, or its family word,
+    // at the catalog's token boundary (DrLabelMatches -- so "Sonnet 5" does NOT
+    // match "Sonnet 5.5"; "Sonnet 5.5" or "Sonnet" does). A button naming
+    // another model is never pressed.
+    static bool RouteConfirmButtonMatches(string name, string prefix, List<string> labels)
+    {
+        if (!RouteConfirmHasPrefix(name, prefix) || labels == null) return false;
+        string rest = name.Trim().Substring(prefix.Trim().Length).Trim();
+        if (rest.Length == 0) return false;
+        foreach (string l in labels)
+        {
+            if (string.IsNullOrEmpty(l)) continue;
+            if (DrLabelMatches(rest, l)) return true;
+            string fam = RouteLabelFamily(l);
+            if (fam != null && DrLabelMatches(rest, fam)) return true;
+        }
+        return false;
+    }
+
+    // One probe -> what to do. Returns the Name of the button to Invoke; ""
+    // when a confirm dialog is up but nothing in it names the target (it is
+    // dismissed); null when there is no dialog. An unrelated "Switch to ..."
+    // button with no dialog title around it is ignored, not dismissed.
+    static string RouteConfirmVerdict(RouteConfirmSeen seen, RouteConfirmCfg cfg, List<string> labels)
+    {
+        if (seen == null || cfg == null) return null;
+        if (seen.Buttons != null)
+            foreach (string b in seen.Buttons)
+                if (RouteConfirmButtonMatches(b, cfg.ButtonPrefix, labels)) return b;
+        return seen.Title ? "" : null;
+    }
+
+    // THE SWITCH WAIT, after the target item was activated. Polls the picker
+    // label until it reads the target tier; meanwhile (for the first
+    // ROUTE_CONFIRM_APPEAR_MS, and for as long as one is up after that) looks for
+    // the confirm dialog and Invokes its "Switch to <target>" button. Never
+    // sends anything: the caller sends exactly once, routed when Switched, else
+    // through FallbackSendOrReport -- and a dialog still up at that point has
+    // been dismissed here first, so the fallback can reach the composer.
+    static RouteSwitchOutcome RouteAwaitSwitch(RouteSwitchIo io, RouteConfirmCfg cfg, List<string> labels,
+        string toTier, string labelBefore, bool usedSelect, bool usedInvoke)
+    {
+        var o = new RouteSwitchOutcome();
+        long start = io.NowMs();
+        long deadline = start + ROUTE_VERIFY_MS;
+        long invokeAt = start + ROUTE_RETRY_INVOKE_MS;
+        long appearBy = start + ROUTE_CONFIRM_APPEAR_MS;
+        long nextProbe = start;
+        long nextConfirmAt = start;
+        bool unconfirmable = false;
+        do
+        {
+            string label = null;
+            try { label = io.ReadLabel(); } catch { }
+            string tier = null;
+            if (!string.IsNullOrEmpty(label)) { try { tier = io.TierOf(label); } catch { } }
+            o.LabelAfter = label;
+            if (RouteSwitchVerified(tier, toTier, label, labelBefore)) { o.Switched = true; break; }
+
+            long now = io.NowMs();
+            if (cfg != null && (now < appearBy || o.DialogSeen) && now >= nextProbe)
+            {
+                RouteConfirmSeen seen = null;
+                try { seen = io.ProbeConfirm(); } catch { }
+                nextProbe = now + ROUTE_CONFIRM_PROBE_MS;
+                string btn = RouteConfirmVerdict(seen, cfg, labels);
+                if (btn != null)
+                {
+                    o.DialogSeen = true;
+                    if (btn.Length == 0) { unconfirmable = true; break; }
+                    if (now >= nextConfirmAt)
+                    {
+                        if (o.ConfirmInvokes >= ROUTE_CONFIRM_MAX_INVOKES) { unconfirmable = true; break; }
+                        o.ConfirmInvokes++;
+                        try { io.InvokeConfirm(btn); } catch { }
+                        long after = io.NowMs();
+                        nextConfirmAt = after + ROUTE_CONFIRM_REINVOKE_MS;
+                        if (after + ROUTE_CONFIRM_SETTLE_MS > deadline) deadline = after + ROUTE_CONFIRM_SETTLE_MS;
+                    }
+                }
+            }
+            // The Select()->Invoke() retry is for a Select() that only
+            // highlighted. Once Claude has put up its dialog the menu item was
+            // activated; re-activating it behind the modal is never wanted.
+            if (!o.DialogSeen && usedSelect && !usedInvoke && now >= invokeAt)
+            {
+                usedInvoke = true;
+                o.Retries++;
+                try { io.RetryActivate(); } catch { }
+            }
+            io.Sleep(60);
+        } while (io.NowMs() < deadline);
+
+        if (o.Switched) return o;
+
+        // Not switched. A dialog still up (or one that appeared late) would keep
+        // focus away from the composer: dismiss it, exactly once.
+        bool dismiss = unconfirmable;
+        if (!dismiss && cfg != null)
+        {
+            RouteConfirmSeen last = null;
+            try { last = io.ProbeConfirm(); } catch { }
+            if (RouteConfirmVerdict(last, cfg, labels) != null) { o.DialogSeen = true; dismiss = true; }
+        }
+        if (dismiss)
+        {
+            o.Dismissals++;
+            try { io.DismissConfirm(); } catch { }
+        }
+        o.Reason = o.DialogSeen ? "confirm_dialog_not_confirmed" : "switch_not_verified";
+        return o;
+    }
+
+    // UIA side of the probe: one depth-capped TreeWalker walk (the technique
+    // FindMenuItemByLabel documents) over `root`, collecting prefix Buttons and
+    // noting a dialog-shaped element carrying the title. `anchor` is the first
+    // thing found, the starting point for finding the dialog's own Cancel.
+    static RouteConfirmSeen RouteProbeConfirmUia(AutomationElement root, RouteConfirmCfg cfg,
+        Dictionary<string, AutomationElement> buttons, ref AutomationElement anchor)
+    {
+        var seen = new RouteConfirmSeen();
+        if (root == null || cfg == null) return seen;
+        string title = cfg.TitleContains ?? "";
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(root, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;
+                AutomationElement el = cur.Key;
+                try
+                {
+                    ControlType ct = el.Current.ControlType;
+                    string name = null;
+                    try { name = el.Current.Name; } catch { }
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        if (ct == ControlType.Button && RouteConfirmHasPrefix(name, cfg.ButtonPrefix))
+                        {
+                            string key = name.Trim();
+                            if (!buttons.ContainsKey(key)) { buttons[key] = el; seen.Buttons.Add(key); }
+                            if (anchor == null) anchor = el;
+                        }
+                        else if (title.Length > 0 && !seen.Title)
+                        {
+                            // A dialog container named with the title, or a
+                            // heading that IS the title ("Switch model?"). Chat
+                            // history text merely mentioning it never counts.
+                            string lct = "";
+                            try { lct = el.Current.LocalizedControlType ?? ""; } catch { }
+                            bool container = ct == ControlType.Window || lct.IndexOf("dialog", StringComparison.OrdinalIgnoreCase) >= 0;
+                            string nt = name.Trim().TrimEnd('?').Trim();
+                            if ((container && name.IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0)
+                                || (ct == ControlType.Text && string.Equals(nt, title, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                seen.Title = true;
+                                if (anchor == null) anchor = el;
+                            }
+                        }
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return seen;
+    }
+
+    // The dialog's OWN Cancel: searched only under the nearest few ancestors of
+    // what the probe found, so an unrelated "Cancel" elsewhere in the app (an
+    // in-progress message edit) is never pressed.
+    static AutomationElement RouteFindDialogCancel(AutomationElement anchor, string cancelName)
+    {
+        if (anchor == null || string.IsNullOrEmpty(cancelName)) return null;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            AutomationElement scope = anchor;
+            for (int up = 0; up < 4 && scope != null; up++)
+            {
+                scope = walker.GetParent(scope);
+                if (scope == null) break;
+                var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+                stack.Push(new KeyValuePair<AutomationElement, int>(scope, 0));
+                while (stack.Count > 0)
+                {
+                    var cur = stack.Pop();
+                    if (cur.Value > 6) continue;
+                    try
+                    {
+                        if (cur.Key.Current.ControlType == ControlType.Button
+                            && string.Equals((cur.Key.Current.Name ?? "").Trim(), cancelName, StringComparison.OrdinalIgnoreCase))
+                            return cur.Key;
+                    }
+                    catch { }
+                    try
+                    {
+                        AutomationElement child = walker.GetFirstChild(cur.Key);
+                        while (child != null)
+                        {
+                            stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                            child = walker.GetNextSibling(child);
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    static bool RouteInvokeElement(AutomationElement el)
+    {
+        if (el == null) return false;
+        try
+        {
+            object p;
+            if (el.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); return true; }
+        }
+        catch { }
+        return false;
+    }
+
+    // ── Putting keyboard focus BACK on the composer before the one Enter ────
+    //
+    // Live 2026-10-05 (e32cf4d, Claude Desktop, existing conversation): the
+    // "Switch model?" dialog was auto-confirmed and the model DID switch to
+    // Sonnet 5.5 -- then the route failed
+    // focus_lost_after_switch_no_fallback_focus_not_in_composer and the prompt
+    // sat unsent until the user pressed Enter again. Closing Claude's menu/modal
+    // leaves keyboard focus on the picker trigger, and UIA SetFocus() on a
+    // Chromium contenteditable does not reliably move KEYBOARD focus back.
+    //
+    // So the refocus is a short, bounded loop (ROUTE_REFOCUS_MS): put Claude's
+    // window back in front if a same-process window took it, SetFocus() the
+    // composer, and -- if focus still is not there -- a real click INSIDE the
+    // composer's own rectangle (only when that point belongs to Claude's
+    // window). Each step re-checks FocusedElement through RouteComposerVerdict:
+    // the Enter goes out only once focus is verifiably on the composer holding
+    // EXACTLY the pinned prompt. It stops without sending if another app took
+    // the foreground or the user edited the text.
+    class RouteRefocusIo
+    {
+        public Func<string> WindowState;       // "same" | "same_process" | "other"
+        public Action RestoreForeground;
+        public Func<string> FocusVerdict;      // null = focus is on the composer holding the prompt; else RouteComposerVerdict reason
+        public Func<string> CandidateVerdict;  // null = a composer holding the prompt exists to focus; else "text_changed" / "no_element"
+        public Func<bool> FocusCandidate;      // UIA SetFocus
+        public Func<bool> ClickCandidate;      // a real click inside the composer
+        public Func<long> NowMs;
+        public Action<int> Sleep;
+    }
+
+    class RouteRefocusOutcome
+    {
+        public bool Ok;
+        public string Reason;
+        public int Focuses, Clicks, Restores;
+    }
+
+    const int ROUTE_REFOCUS_MS = 800;
+    const int ROUTE_REFOCUS_STEP_MS = 120;
+
+    static RouteRefocusOutcome RouteRefocusComposer(RouteRefocusIo io)
+    {
+        var o = new RouteRefocusOutcome();
+        long deadline = io.NowMs() + ROUTE_REFOCUS_MS;
+        int attempt = 0;
+        for (;;)
+        {
+            string ws = "other";
+            try { ws = io.WindowState() ?? "other"; } catch { }
+            if (ws == "other") { o.Reason = "focus_changed"; return o; }
+            if (ws == "same_process")
+            {
+                // A same-process window (a native modal) holds the foreground.
+                if (o.Restores >= 2 || io.NowMs() >= deadline) { o.Reason = "focus_changed"; return o; }
+                o.Restores++;
+                try { io.RestoreForeground(); } catch { }
+                io.Sleep(80);
+                continue;
+            }
+            string fv = "no_element";
+            try { fv = io.FocusVerdict(); } catch { }
+            if (string.IsNullOrEmpty(fv)) { o.Ok = true; return o; }   // "" too: a scripted delegate may yield it
+            if (fv == "text_changed") { o.Reason = fv; return o; }
+            string cv = "no_element";
+            try { cv = io.CandidateVerdict(); } catch { }
+            if (!string.IsNullOrEmpty(cv)) { o.Reason = cv; return o; }
+            if (io.NowMs() >= deadline) { o.Reason = fv; return o; }
+            // SetFocus first (cheap, no pointer); then alternate with a click,
+            // which is what actually moves keyboard focus in Chromium.
+            if (attempt % 2 == 0) { o.Focuses++; try { io.FocusCandidate(); } catch { } }
+            else { o.Clicks++; try { io.ClickCandidate(); } catch { } }
+            attempt++;
+            io.Sleep(ROUTE_REFOCUS_STEP_MS);
+        }
+    }
+
+    // The composer by WHAT IT HOLDS: an Edit/Document element in the window whose
+    // text is exactly the pinned prompt. Used when the known reference died in a
+    // re-render.
+    static AutomationElement RouteFindComposerByText(AutomationElement win, string originalText)
+    {
+        if (win == null) return null;
+        string want = NormalizeWs(originalText);
+        if (want.Length == 0) return null;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(win, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;
+                AutomationElement el = cur.Key;
+                try
+                {
+                    ControlType ct = el.Current.ControlType;
+                    if ((ct == ControlType.Edit || ct == ControlType.Document) && RouteElementEditable(el))
+                    {
+                        string t = null;
+                        try { t = ReadText(el); } catch { }
+                        if (NormalizeWs(t) == want) return el;
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    const uint MOUSEEVENTF_LEFTDOWN = 0x0002, MOUSEEVENTF_LEFTUP = 0x0004;
+    const uint GA_ROOT_WINDOW = 2;
+
+    // One left click inside the composer's own rectangle, toward its right end
+    // (empty editor space: the caret lands at a line end, never on a control).
+    // Refused unless the point is in the pinned window. The cursor is put back.
+    static bool RouteClickInto(AutomationElement el, IntPtr pinnedHwnd)
+    {
+        if (el == null) return false;
+        try
+        {
+            System.Windows.Rect r = el.Current.BoundingRectangle;
+            if (r.IsEmpty || r.Width < 4 || r.Height < 4) return false;
+            POINT p;
+            p.X = (int)(r.Right - Math.Min(12.0, r.Width / 4));
+            p.Y = (int)(r.Top + r.Height / 2);
+            IntPtr at = WindowFromPoint(p);
+            if (at == IntPtr.Zero || GetAncestor(at, GA_ROOT_WINDOW) != pinnedHwnd) return false;
+            POINT saved;
+            bool hadPos = GetCursorPos(out saved);
+            SetCursorPos(p.X, p.Y);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(20);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(30);
+            if (hadPos) SetCursorPos(saved.X, saved.Y);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    // The UIA hands of RouteRefocusComposer. Returns the FOCUSED composer
+    // (verified to hold exactly the pinned prompt), or null with the reason.
+    static AutomationElement RouteRefocusUia(IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement knownComposer, string originalText, out string reason)
+    {
+        AutomationElement focused = null;
+        AutomationElement cand = knownComposer;
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        uint pinnedPid = 0;
+        try { GetWindowThreadProcessId(pinnedHwnd, out pinnedPid); } catch { }
+
+        var io = new RouteRefocusIo();
+        io.WindowState = delegate
+        {
+            IntPtr fg = GetForegroundWindow();
+            if (fg == pinnedHwnd) return "same";
+            uint pid = 0;
+            try { GetWindowThreadProcessId(fg, out pid); } catch { }
+            return (fg == IntPtr.Zero || (pid != 0 && pid == pinnedPid)) ? "same_process" : "other";
+        };
+        io.RestoreForeground = delegate { try { SetForegroundWindow(pinnedHwnd); } catch { } };
+        io.FocusVerdict = delegate
+        {
+            string why;
+            AutomationElement el = AcquireRouteComposer(pinnedRid, null, originalText, false, out why);
+            if (el != null) { focused = el; return null; }
+            return why;
+        };
+        io.CandidateVerdict = delegate
+        {
+            string kt = null;
+            bool readable = false;
+            if (cand != null) { try { kt = ReadText(cand); readable = true; } catch { } }
+            if (readable && RouteComposerVerdict(pinnedRid, pinnedRid, originalText, kt, true) == null) return null;
+            // The reference died in a re-render, or reads something else: find
+            // the composer by what it holds before concluding anything.
+            AutomationElement found = RouteFindComposerByText(win, originalText);
+            if (found != null) { cand = found; return null; }
+            return readable ? "text_changed" : "no_element";
+        };
+        io.FocusCandidate = delegate { try { cand.SetFocus(); return true; } catch { return false; } };
+        io.ClickCandidate = delegate { return RouteClickInto(cand, pinnedHwnd); };
+        io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+
+        RouteRefocusOutcome o = RouteRefocusComposer(io);
+        reason = o.Ok ? null : (o.Reason ?? "no_element");
+        return o.Ok ? focused : null;
+    }
+
+    // Keyboard hook. A plain, user-typed Enter in the route's own window while
+    // a route runs is held key-repeat or an impatient second press. It used to
+    // set _routeAbort (killing the route between expand and select) and reach
+    // StartRoute again. Now it is swallowed and does NOT abort; the running
+    // route sends the prompt once. Shift+Enter (a newline -- an edit), any other
+    // key, our own injected Enter, another window, or a rewrite are unchanged.
+    static bool RouteHookSwallowsEnter(int vk, bool ctrl, bool alt, bool shift, bool injected,
+        bool routeInProgress, bool rewriteInProgress, bool fgIsRouteWindow)
+    {
+        return vk == VK_RETURN && !ctrl && !alt && !shift && !injected
+            && routeInProgress && !rewriteInProgress && fgIsRouteWindow;
+    }
+
+    // Can this element hold the prompt? A menu / button / list item never can.
+    static bool RouteElementEditable(AutomationElement el)
+    {
+        if (el == null) return false;
+        try
+        {
+            ControlType ct = el.Current.ControlType;
+            if (ct == ControlType.Button || ct == ControlType.MenuItem || ct == ControlType.RadioButton
+                || ct == ControlType.Menu || ct == ControlType.MenuBar || ct == ControlType.ListItem
+                || ct == ControlType.List || ct == ControlType.CheckBox || ct == ControlType.Hyperlink
+                || ct == ControlType.TabItem || ct == ControlType.Window || ct == ControlType.TitleBar)
+                return false;
+            object p;
+            return el.TryGetCurrentPattern(ValuePattern.Pattern, out p) || el.TryGetCurrentPattern(TextPattern.Pattern, out p);
+        }
+        catch { return false; }
+    }
+
+    // The user's composer, FOCUSED and holding the pinned prompt, or null with
+    // the reason (RouteComposerVerdict's vocabulary). With `refocus`, a focus
+    // that is merely somewhere else in the window (the model menu, a re-render)
+    // is put BACK on the known composer -- but only when that composer still
+    // reads back exactly the pinned prompt, and never for text_changed: an edit
+    // by the user is theirs, not something to route around.
+    static AutomationElement AcquireRouteComposer(int[] pinnedRid, AutomationElement knownComposer, string originalText, bool refocus, out string reason)
+    {
+        reason = "no_element";
+        int attempts = refocus ? 2 : 1;
+        for (int attempt = 0; attempt < attempts; attempt++)
+        {
+            if (attempt == 1)
+            {
+                if (knownComposer == null) break;
+                string kt = null;
+                try { kt = ReadText(knownComposer); } catch { }
+                if (RouteComposerVerdict(pinnedRid, pinnedRid, originalText, kt, true) != null) break;
+                try { knownComposer.SetFocus(); } catch { break; }
+                Thread.Sleep(150);
+            }
+            AutomationElement el = null;
+            try { el = AutomationElement.FocusedElement; } catch { }
+            if (el == null) { reason = "no_element"; continue; }
+            int[] rid = null; string text = null;
+            try { rid = el.GetRuntimeId(); } catch { }
+            try { text = ReadText(el); } catch { }
+            string v = RouteComposerVerdict(pinnedRid, rid, originalText, text, RouteElementEditable(el));
+            if (v == null) return el;
+            reason = v;
+            if (v == "text_changed") return null;
+        }
+        return null;
     }
 
     // The ONLY place model routing ever sends unrouted. Switching models
@@ -6439,8 +8460,17 @@ public static class CfaiEnforcer
     // with nothing having happened. Only a genuine change of focus or
     // content declines the fallback — sending into a window the user has
     // since moved away from would be actively wrong, not just suboptimal.
+    //
+    // THE ENTER IS RE-SENT EXACTLY ONCE on every path except two, where sending
+    // would be wrong rather than merely unrouted: the foreground window changed
+    // (it would go to another app), or the user's own text changed (it is no
+    // longer the message they pressed Enter on -- and it is still visibly in
+    // the composer). Focus parked in the model menu, a re-rendered composer, an
+    // unverified switch or an interrupted one all re-send: focus is put BACK on
+    // the composer first. Before this, focus in the menu meant this function
+    // never sent, and the user had to press Enter a second time.
     static void FallbackSendOrReport(string routeId, string provider, string fromTier, string toTier, string toLabel, string complexity,
-        IntPtr pinnedHwnd, int[] pinnedComposerRid, string originalText, string reason)
+        IntPtr pinnedHwnd, int[] pinnedComposerRid, AutomationElement knownComposer, string originalText, string reason)
     {
         // Clear the pin unconditionally, BEFORE anything else — regardless
         // of whether the fallback send below succeeds. Confirmed live: when
@@ -6452,20 +8482,17 @@ public static class CfaiEnforcer
         // always, whether it works or not.
         ClearPendingRoute();
 
+        // After a failed picker interaction focus is usually in the model menu
+        // (or on a dismissed dialog's trigger), not the composer: put it back --
+        // RouteRefocusUia: SetFocus, then a click inside the composer, bounded
+        // -- and re-verify the composer still holds exactly the pinned prompt.
+        // It refuses on its own when ANOTHER app holds the foreground
+        // (focus_changed) or the user edited the text (text_changed).
+        string whyNot;
+        AutomationElement el = RouteRefocusUia(pinnedHwnd, pinnedComposerRid, knownComposer, originalText, out whyNot);
+        if (el == null) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + whyNot); return; }
+        // The refocus took time: the window check again, immediately before Enter.
         if (GetForegroundWindow() != pinnedHwnd) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed"); return; }
-
-        // After a failed picker interaction, focus may be on the picker
-        // button instead of the composer. Just report the failure and let
-        // the user press Enter again — the next attempt will find the
-        // composer focused (picker closed naturally) and route or send.
-        AutomationElement el;
-        try { el = AutomationElement.FocusedElement; } catch { el = null; }
-        if (el == null) { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_no_element"); return; }
-        int[] rid = null; string text = null;
-        try { rid = el.GetRuntimeId(); } catch { }
-        try { text = ReadText(el); } catch { }
-        if (!RuntimeIdEquals(rid, pinnedComposerRid) || NormalizeWs(text) != NormalizeWs(originalText))
-        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_text_changed"); return; }
 
         Emit("prompt", _app, "", "send", originalText.Length);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
@@ -6484,8 +8511,13 @@ public static class CfaiEnforcer
     }
 
     static void RunRoute(string routeId, string fromTier, string toTier, string toLabel, string provider, string complexity,
-        string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd)
+        string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd, AutomationElement pinnedComposerEl)
     {
+        RouteMeta meta = _activeRouteMeta;
+        // The best-known live reference to the user's composer: the poll
+        // thread's, until the pre-flight below confirms the focused one. Every
+        // fallback gets it so it can put focus back before re-sending.
+        AutomationElement knownComposer = pinnedComposerEl;
         try
         {
             // Pre-flight: everything pinned at Enter-press time must still
@@ -6493,54 +8525,62 @@ public static class CfaiEnforcer
             // FallbackSendOrReport's own header for why that is safe for
             // routing specifically, unlike a PII rewrite.
             if (GetForegroundWindow() != pinnedHwnd)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "focus_changed"); return; }
-            AutomationElement composerEl;
-            try { composerEl = AutomationElement.FocusedElement; } catch { composerEl = null; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "focus_changed"); return; }
+            // The composer is identified by WHAT IT HOLDS, not by RuntimeId
+            // alone: Claude Desktop re-renders it, and the same composer with
+            // the same prompt used to fail here as 'element_changed'.
+            string preflightWhy;
+            AutomationElement composerEl = AcquireRouteComposer(pinnedComposerRid, knownComposer, originalText, false, out preflightWhy);
             if (composerEl == null)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "no_focused_element"); return; }
-            int[] curRid = null;
-            try { curRid = composerEl.GetRuntimeId(); } catch { }
-            if (!RuntimeIdEquals(curRid, pinnedComposerRid))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "element_changed"); return; }
-            string curText = null;
-            try { curText = ReadText(composerEl); } catch { }
-            if (NormalizeWs(curText) != NormalizeWs(originalText))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "text_changed"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, preflightWhy); return; }
+            knownComposer = composerEl;
 
             long waitStart = DateTime.UtcNow.Ticks;
             while (Down(VK_CONTROL) || Down(VK_MENU) || Down(VK_SHIFT) || Down(VK_RETURN))
             {
                 if ((DateTime.UtcNow.Ticks - waitStart) > TimeSpan.FromMilliseconds(2500).Ticks)
-                { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "modifiers_stuck"); return; }
+                { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "modifiers_stuck"); return; }
                 Thread.Sleep(20);
             }
 
             AutomationElement picker = _mrCachedPicker;
             if (picker == null || _mrCachedPickerHwnd != pinnedHwnd)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "picker_not_found"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "picker_not_found"); return; }
             string labelBefore = null;
             try { labelBefore = picker.Current.Name; } catch { }
             if (string.IsNullOrEmpty(labelBefore))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "picker_unreadable"); return; }
-            var currentCheck = DetectModelInfo(labelBefore);
-            if (currentCheck == null || currentCheck.Tier != fromTier)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "model_changed"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "picker_unreadable"); return; }
+            // Tier read through the SHARED CATALOG (MrTierOfLabel), not the
+            // keyword chain: the label also carries an effort token, and only the
+            // tier decides whether the picker still shows what the pin assumed.
+            string checkTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelBefore) : null;
+            if (checkTier == null || checkTier != fromTier)
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "model_changed"); return; }
+            // ALREADY THERE: never open the picker for a no-op. The pin is only
+            // armed for a real change, so this is the belt to that braces.
+            if (string.Equals(checkTier, toTier, StringComparison.Ordinal))
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "already_on_target"); return; }
+            string effortFrom = ModelEffortFromLabel(labelBefore, MODEL_PICKER_NAME_PREFIX_DEFAULT);
+            // Most specific first, from the catalog (+ policy overrides / a
+            // rule's own ui_name); the pinned label alone if there is no list.
+            List<string> labels = (meta != null && meta.ClickLabels != null && meta.ClickLabels.Count > 0)
+                ? meta.ClickLabels : new List<string> { toLabel };
 
             object expandObj;
             if (!picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out expandObj))
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "no_expand_pattern"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "no_expand_pattern"); return; }
             var expandPattern = (ExpandCollapsePattern)expandObj;
             try { expandPattern.Expand(); }
-            catch { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "expand_failed"); return; }
+            catch { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "expand_failed"); return; }
 
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd)
-            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "interrupted_after_expand"); return; }
+            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "interrupted_after_expand"); return; }
 
             Thread.Sleep(150);   // let the popover render its items
 
             AutomationElement win = null;
             try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
-            AutomationElement targetItem = win != null ? FindMenuItemByLabel(win, toLabel) : null;
+            AutomationElement targetItem = win != null ? FindMenuItemByLabels(win, labels) : null;
             if (targetItem == null && win != null)
             {
                 // Some tiers only appear behind a "More models" submenu
@@ -6579,79 +8619,155 @@ public static class CfaiEnforcer
                         try { ((ExpandCollapsePattern)mmExpandObj).Expand(); } catch { }
                     }
                     Thread.Sleep(200);
-                    targetItem = FindMenuItemByLabel(win, toLabel);
+                    targetItem = FindMenuItemByLabels(win, labels);
                     if (hadPos) { try { SetCursorPos(savedPos.X, savedPos.Y); } catch { } }
                 }
             }
             if (targetItem == null)
-            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "target_item_not_found"); return; }
+            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "target_item_not_found"); return; }
 
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd)
-            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "interrupted_before_select"); return; }
+            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "interrupted_before_select"); return; }
 
-            bool selected = false;
+            // Recorded BEFORE the click, so the picker change it causes is known
+            // to be ours and never counted as the user's own choice.
+            if (meta != null) MrNoteOurSwitch(meta.ChoiceKey, toTier);
+            // ACTIVATION. SelectionItem.Select() first (the shape the More-models
+            // Haiku switch was live-verified with), then -- if the picker has not
+            // switched shortly after -- Invoke() on the same item, which is
+            // Chromium's default action (a click). Live on Claude Desktop the menu
+            // opened and the model did NOT change: a Select() that returns without
+            // throwing but only HIGHLIGHTS the radio item, followed by the
+            // collapse that used to run 300ms later, closes the menu having chosen
+            // nothing. The picker is therefore NOT collapsed until verification
+            // is over. Activating the same target item twice is idempotent.
+            bool usedSelect = false, usedInvoke = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
-            { try { ((SelectionItemPattern)selObj).Select(); selected = true; } catch { } }
-            if (!selected && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
-            { try { ((InvokePattern)selObj).Invoke(); selected = true; } catch { } }
-            if (!selected)
-            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "select_failed"); return; }
+            { try { ((SelectionItemPattern)selObj).Select(); usedSelect = true; } catch { } }
+            if (!usedSelect && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
+            { try { ((InvokePattern)selObj).Invoke(); usedInvoke = true; } catch { } }
+            if (!usedSelect && !usedInvoke)
+            { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "select_failed"); return; }
 
             // A settle delay before even starting to poll: a NESTED selection
             // (behind "More models") re-renders more of the surrounding menu
             // chrome than a top-level one, and needs more than the roughly
             // 40-80ms a top-level switch settles in.
             Thread.Sleep(300);
-            TryCollapsePicker(picker);   // best-effort — selecting usually closes it on its own
 
-            // Re-find the button FRESH once, rather than trusting the cached
-            // `picker` reference — see FindModelPickerButton's comment for
-            // why a stale reference can silently mask a switch that already
-            // happened. One extra tree walk here, not one per poll: cheap
-            // relative to the rest of this operation, and this thread is
-            // never the one guarding the critical DLP block path.
+            // VERIFY against a FRESH picker button, re-found DURING the poll and
+            // not just once: Claude Desktop re-renders the button when the model
+            // changes, and a reference fetched before that re-render keeps
+            // returning the pre-switch label without ever throwing -- which reads
+            // as switch_not_verified for a switch that happened. A re-find is a
+            // tree walk, so it is throttled (every ~250ms, or when the read
+            // fails); this thread is never the one guarding the DLP block path.
             AutomationElement verifyEl = FindModelPickerButton(win) ?? picker;
-            // Keep the poll thread's cache current too, so the NEXT tick of
-            // UpdateModelRouting doesn't keep reading whatever went stale.
             if (verifyEl != null) { _mrCachedPicker = verifyEl; _mrCachedPickerHwnd = pinnedHwnd; }
 
-            string labelAfter = null;
-            bool switched = false;
-            long verifyDeadline = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(1500).Ticks;
-            do
+            // The wait itself is RouteAwaitSwitch (pure loop, harness-driven);
+            // these are its UIA hands. ReadLabel re-finds the picker DURING the
+            // poll (every ~250ms, or when a read fails) -- a reference fetched
+            // once goes stale when Claude Desktop re-renders the button.
+            long nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
+            RouteConfirmCfg confirmCfg = meta != null ? MrConfirmDialogCfg(meta.Surface, meta.HostOrApp) : null;
+            var confirmButtons = new Dictionary<string, AutomationElement>(StringComparer.OrdinalIgnoreCase);
+            AutomationElement confirmAnchor = null;
+            var io = new RouteSwitchIo();
+            io.ReadLabel = delegate
             {
-                try { labelAfter = verifyEl.Current.Name; } catch { }
-                if (!string.IsNullOrEmpty(labelAfter) && !string.Equals(labelAfter, labelBefore, StringComparison.Ordinal)) { switched = true; break; }
-                Thread.Sleep(60);
-            } while (DateTime.UtcNow.Ticks < verifyDeadline);
-            if (!switched)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "switch_not_verified"); return; }
+                string l = null;
+                try { l = verifyEl != null ? verifyEl.Current.Name : null; } catch { }
+                if (DateTime.UtcNow.Ticks >= nextRefind || string.IsNullOrEmpty(l))
+                {
+                    AutomationElement fresh = FindModelPickerButton(win);
+                    if (fresh != null) { verifyEl = fresh; _mrCachedPicker = fresh; _mrCachedPickerHwnd = pinnedHwnd; }
+                    nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
+                }
+                return l;
+            };
+            io.TierOf = delegate(string l) { return meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, l) : null; };
+            io.RetryActivate = delegate
+            {
+                object invObj;
+                try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
+            };
+            io.ProbeConfirm = delegate
+            {
+                confirmButtons.Clear();
+                confirmAnchor = null;
+                RouteConfirmSeen seen = RouteProbeConfirmUia(win, confirmCfg, confirmButtons, ref confirmAnchor);
+                // A native modal would be its own foreground window of the SAME
+                // process; Claude's is in-page today, but look there too.
+                IntPtr fgNow = GetForegroundWindow();
+                if (seen.Buttons.Count == 0 && !seen.Title && fgNow != pinnedHwnd && fgNow != IntPtr.Zero)
+                {
+                    uint pidA = 0, pidB = 0;
+                    try { GetWindowThreadProcessId(pinnedHwnd, out pidA); GetWindowThreadProcessId(fgNow, out pidB); } catch { }
+                    if (pidA != 0 && pidA == pidB)
+                    {
+                        AutomationElement fgEl = null;
+                        try { fgEl = AutomationElement.FromHandle(fgNow); } catch { }
+                        if (fgEl != null) seen = RouteProbeConfirmUia(fgEl, confirmCfg, confirmButtons, ref confirmAnchor);
+                    }
+                }
+                return seen;
+            };
+            io.InvokeConfirm = delegate(string name)
+            {
+                AutomationElement b;
+                return confirmButtons.TryGetValue(name, out b) && RouteInvokeElement(b);
+            };
+            io.DismissConfirm = delegate
+            {
+                AutomationElement cancel = RouteFindDialogCancel(confirmAnchor, confirmCfg != null ? confirmCfg.CancelName : null);
+                if (!RouteInvokeElement(cancel))
+                {
+                    // Escape only into Claude's own window -- never another app.
+                    uint pidA = 0, pidB = 0;
+                    IntPtr fgNow = GetForegroundWindow();
+                    try { GetWindowThreadProcessId(pinnedHwnd, out pidA); GetWindowThreadProcessId(fgNow, out pidB); } catch { }
+                    if (fgNow == pinnedHwnd || (pidA != 0 && pidA == pidB)) SendKeyPress(VK_ESCAPE);
+                }
+                Thread.Sleep(200);
+            };
+            io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+            io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+
+            RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
+            string labelAfter = waited.LabelAfter;
+            TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
+            if (!waited.Switched)
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, waited.Reason ?? "switch_not_verified"); return; }
+            if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
+            string effortTo = ModelEffortFromLabel(labelAfter, MODEL_PICKER_NAME_PREFIX_DEFAULT);
 
             // The dropdown interaction moves keyboard focus into the popover
             // and, confirmed live, it does NOT return to the composer on its
             // own once the menu closes — Chromium keeps focus wherever the
-            // selection landed. Ask UIA to put it back on the SAME element
-            // we pinned before the switch (still a live reference — the
-            // composer itself was never touched by any of this) rather than
-            // assuming it will happen by itself.
-            try { composerEl.SetFocus(); } catch { }
-            Thread.Sleep(150);
-
-            AutomationElement composerAfter;
-            try { composerAfter = AutomationElement.FocusedElement; } catch { composerAfter = null; }
-            int[] afterRid = null; string afterText = null;
-            if (composerAfter != null)
+            // selection landed. Put it back on the composer and re-verify it
+            // by what it HOLDS (AcquireRouteComposer, refocus), not by
+            // RuntimeId alone -- a re-render must not turn a successful switch
+            // into a failure.
+            // Live (e32cf4d): after a confirmed "Switch model?" dialog, focus
+            // stayed on the picker and a bare SetFocus did not move it -- the
+            // switch landed and the prompt was never sent. RouteRefocusUia
+            // retries SetFocus and a click inside the composer, bounded.
+            string afterWhy;
+            AutomationElement composerAfter = RouteRefocusUia(pinnedHwnd, pinnedComposerRid, composerEl, originalText, out afterWhy);
+            if (composerAfter == null)
             {
-                try { afterRid = composerAfter.GetRuntimeId(); } catch { }
-                try { afterText = ReadText(composerAfter); } catch { }
+                // The switch DID happen, so this is not an unrouted send, and
+                // with focus unverifiable no Enter goes anywhere: the prompt
+                // stays visibly in the composer for the user.
+                ClearPendingRoute();
+                EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", -1, "focus_lost_after_switch_" + afterWhy, effortFrom, effortTo);
+                return;
             }
-            bool composerOk = composerAfter != null && RuntimeIdEquals(afterRid, pinnedComposerRid) && NormalizeWs(afterText) == NormalizeWs(originalText);
-            if (!composerOk)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "focus_lost_after_switch"); return; }
 
             if (GetForegroundWindow() != pinnedHwnd)
-            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "focus_changed_before_send"); return; }
+            { FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "focus_changed_before_send"); return; }
 
             // Release state before Enter — our own synthetic Enter passes
             // back through this same keyboard hook. See RunRewrite's
@@ -6670,18 +8786,300 @@ public static class CfaiEnforcer
             string postSend = null;
             try { postSend = ReadText(composerAfter); } catch { }
             bool stillThere = NormalizeWs(postSend) == NormalizeWs(originalText);
-            if (stillThere) { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted"); return; }
+            if (stillThere) { EmitRoute(_app, provider, toTier /* now-current */, toTier, toLabel, complexity, "failed", originalText.Length, "not_submitted", effortFrom, effortTo); return; }
 
-            EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length);
+            EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "ok", originalText.Length, null, effortFrom, effortTo);
         }
         catch (Exception)
         {
-            FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, "exception");
+            FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "exception");
         }
         finally
         {
+            _activeRouteMeta = null;
             _routeInProgress = false;
         }
+    }
+
+    // ════ THE WEB ARM ON THE DESKTOP ARM'S MACHINERY ═══════════════════════
+    //
+    // Live 2026-10-06 (agent 1307630, no extension in the browser, so THIS
+    // enforcer's web arm handled claude.ai in Chrome/Edge): Claude Desktop routed
+    // both ways, while every claude.ai route failed --
+    //   desktop_web_uia claude.ai failed simple Sonnet 5.5 -> Haiku 4.5
+    //   reason from_tier_not_confirmed_fallback_not_submitted
+    // -- with the model menu left OPEN ("Sonnet 5.5 ... (checked)", "Effort
+    // Medium >", "More models >") and the prompt unsent. Three causes:
+    //   1. The from-tier confirmation searched the menu for the surface table's
+    //      single 2026-09-22 name 'Sonnet 5' (ai-processes.js tierLabels), which
+    //      the boundary rule correctly refuses to match against 'Sonnet 5.5 ...'.
+    //   2. TryCollapsePicker (ExpandCollapse.Collapse) does not close claude.ai's
+    //      menu, and the fallback then pressed Enter INTO the open menu.
+    //   3. Nothing put keyboard focus back on the composer before that Enter.
+    // So the web arm now runs on the desktop arm's pieces: the shared catalog's
+    // click labels (MrClickLabelsFor), the "More models" hover, RouteAwaitSwitch
+    // (Select -> Invoke retry, "Switch model?" auto-confirm), RouteRefocusComposer
+    // (SetFocus, then a bounded click inside the composer) and exactly one Enter.
+    // What stays web-specific is only what a browser demands: the composer is
+    // read through the one door (CachedWebComposer / the element it returned at
+    // pre-flight -- never FocusedElement's TEXT), foreground / host / navigation
+    // are re-checked, another window of the same process is ANOTHER BROWSER
+    // WINDOW (never "restored" to the front), and Escape goes only into the
+    // pinned browser window while a model menu is verifiably showing.
+
+    // The submenu some tiers live behind. Same literal the desktop arm hovers.
+    const string ROUTE_MORE_MODELS_LABEL = "More models";
+
+    // ── Closing a model menu that is still showing ──────────────────────────
+    //
+    // Pure loop, harness-driven. Escape is pressed ONLY while the menu is seen
+    // open (one per level: a submenu, then the menu), ONLY while the pinned
+    // window is in front, and at most ROUTE_COLLAPSE_MAX_ESCAPES times. Closed
+    // false means the caller must NOT press Enter: it would land in the menu
+    // (activating its highlighted item), which is exactly the live defect.
+    class RouteCollapseIo
+    {
+        public Func<bool> MenuOpen;        // is a model menu (or its submenu) showing?
+        public Action CollapsePattern;     // ExpandCollapse.Collapse() on the picker
+        public Func<bool> WindowOk;        // is the pinned window still in front?
+        public Action SendEscape;
+        public Action<int> Sleep;
+    }
+
+    class RouteCollapseOutcome
+    {
+        public bool Closed;
+        public string Reason;              // null when Closed
+        public int Escapes;
+    }
+
+    const int ROUTE_COLLAPSE_MAX_ESCAPES = 3;
+
+    static RouteCollapseOutcome RouteCollapseMenu(RouteCollapseIo io)
+    {
+        var o = new RouteCollapseOutcome();
+        bool open = false;
+        try { open = io.MenuOpen(); } catch { open = false; }
+        if (!open) { o.Closed = true; return o; }
+        try { io.CollapsePattern(); } catch { }
+        io.Sleep(80);
+        for (;;)
+        {
+            try { open = io.MenuOpen(); } catch { open = false; }
+            if (!open) { o.Closed = true; return o; }
+            if (o.Escapes >= ROUTE_COLLAPSE_MAX_ESCAPES) { o.Reason = "menu_still_open"; return o; }
+            bool winOk = false;
+            try { winOk = io.WindowOk(); } catch { }
+            if (!winOk) { o.Reason = "focus_changed"; return o; }
+            o.Escapes++;
+            try { io.SendEscape(); } catch { }
+            io.Sleep(120);
+        }
+    }
+
+    // Is a model menu showing in this window? Its ITEMS -- elements of the
+    // surface's item control types whose Name starts (at the boundary) with any
+    // catalog click label, or the "More models" entry -- exist in the UIA tree
+    // only while it is open. Names are compared, never kept.
+    static bool WebMenuLooksOpen(AutomationElement win, WebPicker wp, List<string> itemLabels)
+    {
+        if (win == null || wp == null || string.IsNullOrEmpty(wp.ItemControlTypes)) return false;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(win, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;
+                AutomationElement el = cur.Key;
+                try
+                {
+                    if (MrItemTypeAllowed(el.Current.ControlType, wp.ItemControlTypes) && !el.Current.IsOffscreen)
+                    {
+                        string name = null;
+                        try { name = StripSelectedPrefix(el.Current.Name, wp.ItemSelectedPrefix); } catch { }
+                        if (!string.IsNullOrEmpty(name))
+                        {
+                            if (ModelItemNameMatches(name, ROUTE_MORE_MODELS_LABEL)) return true;
+                            if (itemLabels != null)
+                                foreach (string l in itemLabels)
+                                    if (!string.IsNullOrEmpty(l) && ModelItemNameMatches(name, l)) return true;
+                        }
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // The UIA hands of RouteCollapseMenu for a browser. Returns null when no
+    // model menu is showing any more, else the reason it could not be closed.
+    static string WebCollapseMenuUia(IntPtr pinnedHwnd, RouteCtx ctx)
+    {
+        if (ctx == null || ctx.Picker == null) return null;
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        if (win == null) return null;
+        List<string> labels = MrAllClickLabels("browser", ctx.Host);
+        WebPicker wp = ctx.Picker;
+        var io = new RouteCollapseIo();
+        io.MenuOpen = delegate { return WebMenuLooksOpen(win, wp, labels); };
+        io.CollapsePattern = delegate
+        {
+            AutomationElement p = FindWebPickerButton(win, wp);
+            if (p != null) TryCollapsePicker(p);
+        };
+        io.WindowOk = delegate { return GetForegroundWindow() == pinnedHwnd; };
+        // Into the pinned BROWSER window only -- never another window, not even
+        // another window of the same browser process.
+        io.SendEscape = delegate { if (GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE); };
+        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        RouteCollapseOutcome o = RouteCollapseMenu(io);
+        return o.Closed ? null : (o.Reason ?? "menu_still_open");
+    }
+
+    // The first catalog label that matches EXACTLY ONE item in the open menu.
+    // Ambiguity is a refusal (FindWebPickerItemUnique), never a first-match.
+    static AutomationElement WebFindTargetItem(AutomationElement win, WebPicker wp, List<string> labels, ref bool anyAmbiguous)
+    {
+        if (win == null || wp == null || labels == null) return null;
+        foreach (string lbl in labels)
+        {
+            if (string.IsNullOrEmpty(lbl)) continue;
+            int n;
+            AutomationElement el = FindWebPickerItemUnique(win, lbl, wp.ItemControlTypes, wp.ItemSelectedPrefix, out n);
+            if (el != null) return el;
+            if (n >= 2) anyAmbiguous = true;
+        }
+        return null;
+    }
+
+    // The desktop arm's "More models" step, for a browser. claude.ai (2026-10)
+    // shows only the current model, "Effort" and "More models" at the top level;
+    // Haiku and Opus are inside the submenu, which opens on POINTER HOVER (the
+    // accessibility Expand() alone does not render it -- confirmed on Claude
+    // Desktop, the same web app). So, exactly as RunRoute does: move the cursor
+    // over the item, Expand() too, wait, search again, put the cursor back. The
+    // cursor is moved only when that point belongs to the pinned browser window.
+    // A surface with no "More models" item (gemini) does nothing here.
+    static AutomationElement WebOpenMoreModelsAndFind(AutomationElement win, IntPtr pinnedHwnd, WebPicker wp, List<string> labels, ref bool anyAmbiguous, out bool opened)
+    {
+        opened = false;
+        if (win == null || wp == null) return null;
+        int n;
+        AutomationElement more = FindWebPickerItemUnique(win, ROUTE_MORE_MODELS_LABEL, wp.ItemControlTypes, wp.ItemSelectedPrefix, out n);
+        if (more == null) return null;
+        opened = true;
+        POINT savedPos;
+        bool hadPos = GetCursorPos(out savedPos);
+        try
+        {
+            System.Windows.Rect r = more.Current.BoundingRectangle;
+            if (!r.IsEmpty && r.Width > 0 && r.Height > 0)
+            {
+                POINT p;
+                p.X = (int)(r.Left + r.Width / 2);
+                p.Y = (int)(r.Top + r.Height / 2);
+                IntPtr at = WindowFromPoint(p);
+                if (at != IntPtr.Zero && GetAncestor(at, GA_ROOT_WINDOW) == pinnedHwnd) SetCursorPos(p.X, p.Y);
+            }
+        }
+        catch { }
+        object mmExpandObj;
+        try
+        {
+            if (more.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out mmExpandObj))
+            { try { ((ExpandCollapsePattern)mmExpandObj).Expand(); } catch { } }
+        }
+        catch { }
+        Thread.Sleep(200);
+        AutomationElement hit = WebFindTargetItem(win, wp, labels, ref anyAmbiguous);
+        if (hadPos) { try { SetCursorPos(savedPos.X, savedPos.Y); } catch { } }
+        return hit;
+    }
+
+    // Is keyboard focus on (or inside) the pinned composer? Compared by
+    // RuntimeId ONLY -- the focused element's TEXT is never read: in a browser
+    // that is whatever box has the caret (a password field, the omnibox). A
+    // focusable child of the composer (some editors focus an inner node) counts,
+    // up to four levels.
+    static bool WebFocusIsInComposer(int[] pinnedRid)
+    {
+        if (pinnedRid == null) return false;
+        try
+        {
+            AutomationElement f = AutomationElement.FocusedElement;
+            var walker = TreeWalker.ControlViewWalker;
+            for (int up = 0; up < 5 && f != null; up++)
+            {
+                int[] rid = null;
+                try { rid = f.GetRuntimeId(); } catch { }
+                if (rid != null && RuntimeIdEquals(rid, pinnedRid)) return true;
+                f = walker.GetParent(f);
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // The UIA hands of RouteRefocusComposer for a browser -- the SAME loop the
+    // desktop arm runs (SetFocus, then a click inside the composer, bounded,
+    // re-verified each step). Returns the composer (holding exactly the pinned
+    // prompt, with keyboard focus on it), or null with the reason. The composer
+    // is the element the one door returned (knownComposer), else the door again;
+    // its RuntimeId must still be the pinned one.
+    static AutomationElement WebRefocusUia(IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement knownComposer, string originalText, out string reason)
+    {
+        AutomationElement cand = knownComposer;
+        var io = new RouteRefocusIo();
+        // A browser's other windows share its process: one of them in front is
+        // the user's choice, never something to pull back from.
+        io.WindowState = delegate { return GetForegroundWindow() == pinnedHwnd ? "same" : "other"; };
+        io.RestoreForeground = delegate { };
+        io.CandidateVerdict = delegate
+        {
+            AutomationElement c = cand;
+            int[] rid = null; string t = null; bool readable = false;
+            if (c != null) { try { rid = c.GetRuntimeId(); t = ReadText(c); readable = true; } catch { readable = false; } }
+            if (!readable || !RuntimeIdEquals(rid, pinnedRid))
+            {
+                AutomationElement door = CachedWebComposer();
+                readable = false;
+                if (door != null) { try { rid = door.GetRuntimeId(); t = ReadText(door); readable = true; } catch { } }
+                if (!readable || !RuntimeIdEquals(rid, pinnedRid)) return "no_element";
+                c = door;
+            }
+            cand = c;
+            return NormalizeWs(t) == NormalizeWs(originalText) ? null : "text_changed";
+        };
+        io.FocusVerdict = delegate
+        {
+            if (!WebFocusIsInComposer(pinnedRid)) return "focus_not_in_composer";
+            string t = null;
+            try { t = ReadText(cand); } catch { return "no_element"; }
+            return NormalizeWs(t) == NormalizeWs(originalText) ? null : "text_changed";
+        };
+        io.FocusCandidate = delegate { try { cand.SetFocus(); return true; } catch { return false; } };
+        io.ClickCandidate = delegate { return RouteClickInto(cand, pinnedHwnd); };
+        io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        RouteRefocusOutcome o = RouteRefocusComposer(io);
+        reason = o.Ok ? null : (o.Reason ?? "no_element");
+        return o.Ok ? cand : null;
     }
 
     // ════ AI-216: THE WEB ROUTE ═════════════════════════════════════════════
@@ -6725,10 +9123,17 @@ public static class CfaiEnforcer
     //                  select_failed, switch_not_verified, modifiers_stuck,
     //                  model_changed, from_tier_not_confirmed, no_expand_pattern,
     //                  expand_failed, interrupted_after_expand,
-    //                  interrupted_before_select
+    //                  interrupted_before_select, confirm_dialog_not_confirmed,
+    //                  already_on_target. Before the one Enter the model menu is
+    //                  closed (WebCollapseMenuUia) and focus put back on the
+    //                  composer (WebRefocusUia); when either cannot be done the
+    //                  result is failed <reason>_no_fallback_<why> and NO Enter.
     //   failed         nothing was sent, and the text is still in the composer.
     //                  reasons: focus_changed, navigated, host_changed,
-    //                  composer_lost, not_submitted, expired, exception
+    //                  composer_lost, not_submitted, expired, exception,
+    //                  focus_lost_after_switch_<why> (switched, then the menu
+    //                  would not close or focus would not return -- the desktop
+    //                  arm's reason, same vocabulary)
     //   ok + restored  the switch emptied the composer, the prompt was retyped,
     //                  read back exactly, and sent.
     //   restored_not_sent  the retype did not read back exactly. Stopped. The
@@ -6738,6 +9143,8 @@ public static class CfaiEnforcer
         string originalText, int[] pinnedComposerRid, IntPtr pinnedHwnd, RouteCtx ctx)
     {
         string effortFrom = (ctx != null ? ctx.EffortFrom : "") ?? "";
+        RouteMeta meta = _activeRouteMeta;
+        AutomationElement composerEl = null;
         try
         {
             if (ctx == null || ctx.Picker == null)
@@ -6759,7 +9166,7 @@ public static class CfaiEnforcer
             // THE ONE DOOR. Never AutomationElement.FocusedElement -- on a
             // browser that is whatever text box has the caret, which is the
             // whole defect this ticket's design note is about.
-            AutomationElement composerEl = CachedWebComposer();
+            composerEl = CachedWebComposer();
             if (composerEl == null)
             { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "composer_lost"); return; }
             int[] curRid = null;
@@ -6782,80 +9189,89 @@ public static class CfaiEnforcer
             while (Down(VK_CONTROL) || Down(VK_MENU) || Down(VK_SHIFT) || Down(VK_RETURN))
             {
                 if ((DateTime.UtcNow.Ticks - waitStart) > TimeSpan.FromMilliseconds(2500).Ticks)
-                { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "modifiers_stuck"); return; }
+                { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "modifiers_stuck", composerEl); return; }
                 Thread.Sleep(20);
             }
 
             AutomationElement win = null;
             try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
             if (win == null)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found", composerEl); return; }
 
             AutomationElement picker = VerifiedWebPicker(pinnedHwnd, ctx.Host, ctx.Picker);
             if (picker == null)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found", composerEl); return; }
             string labelBefore = null;
             try { labelBefore = picker.Current.Name; } catch { }
             if (string.IsNullOrEmpty(labelBefore))
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_unreadable"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_unreadable", composerEl); return; }
             // Re-read the effort from the FRESH label rather than trusting the
             // pin's copy, so effort_from describes the moment the switch was
             // actually attempted.
             effortFrom = ModelEffortFromLabel(labelBefore, ctx.Picker.NamePrefix);
-            // TIER-ONLY, and that is the point of doing it through
-            // DetectModelInfo rather than a string compare: the label also
-            // carries an effort token, and an effort change on its own must
-            // never read as a model change.
-            var currentCheck = DetectModelInfo(labelBefore);
-            if (currentCheck == null || currentCheck.Tier != fromTier)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "model_changed"); return; }
+            // TIER-ONLY, through the SHARED CATALOG (MrTierOfLabel) exactly as
+            // the desktop arm reads it ('Model: Sonnet 5.5 Medium' -> standard);
+            // the surface's own button table is the fallback (gemini's
+            // 'currently Flash'). An effort change on its own must never read as
+            // a model change.
+            string checkTier = WebTierOfLabel(meta, ctx, labelBefore);
+            if (checkTier == null || checkTier != fromTier)
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "model_changed", composerEl); return; }
+            // ALREADY THERE: never open the picker for a no-op (the desktop
+            // arm's belt to the pin's braces).
+            if (string.Equals(checkTier, toTier, StringComparison.Ordinal))
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "already_on_target", composerEl); return; }
+            string surfaceHost = meta != null ? meta.HostOrApp : (ctx.Host ?? "");
 
             object expandObj;
             if (!picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out expandObj))
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "no_expand_pattern"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "no_expand_pattern", composerEl); return; }
             try { ((ExpandCollapsePattern)expandObj).Expand(); }
-            catch { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "expand_failed"); return; }
+            catch { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "expand_failed", composerEl); return; }
 
+            // From here on the menu may be open. EVERY failure below goes
+            // through WebFallbackSendOrReport, which closes it (Escape into
+            // this browser window while it is still showing) BEFORE putting
+            // focus back on the composer and pressing Enter exactly once.
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_after_expand"); return; }
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_after_expand", composerEl); return; }
 
             Thread.Sleep(150);   // let the popover render its items
 
             // ── PRE-SWITCH CONFIRMATION of the pinned from_tier ─────────────
             //
-            // The button label already said which tier is current, but that is
-            // ONE reading of ONE string. SelectionItemPattern.IsSelected is a
-            // SECOND, INDEPENDENT signal from a different element, and the pin
-            // is 15s old by the time it is consumed. Requiring both is what
-            // stops a route acting on a stale picture of the world.
-            //
-            // Skipped only when this surface lists no label for the current
-            // tier -- there is then nothing to look for, and the button label
-            // stands alone. Any other failure to confirm sends unrouted: the
-            // prompt still goes, just with whatever model is selected.
-            string fromLabel = WebPickerTierLabel(ctx.Picker, MrTierNum(fromTier));
-            if (!string.IsNullOrEmpty(fromLabel))
-            {
-                int fromCount;
-                AutomationElement fromItem = FindWebPickerItemUnique(win, fromLabel, ctx.Picker.ItemControlTypes, ctx.Picker.ItemSelectedPrefix, out fromCount);
-                // Fail ONLY on positive evidence of a mismatch. WEB_SEL_UNKNOWN
-                // means this surface exposes no SelectionItemPattern (Gemini),
-                // and refusing there would abort every route on it.
-                if (fromItem == null || WebItemSelectionState(fromItem) == WEB_SEL_NO)
-                { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "from_tier_not_confirmed"); return; }
-            }
+            // A second, independent signal (SelectionItemPattern.IsSelected on
+            // the current model's ITEM), found by the shared catalog's click
+            // labels for the from tier -- ["Sonnet 5.5", "Sonnet 5", "Sonnet"] --
+            // not the surface table's one 2026-09-22 name. The route refuses
+            // ONLY on positive evidence of a mismatch: the item is there and
+            // says it is NOT selected. Not finding it is no evidence (claude.ai
+            // keeps Haiku/Opus inside "More models", so a user ON Haiku has no
+            // top-level item to confirm), and neither is a surface with no
+            // SelectionItemPattern (gemini). The button label read above
+            // through the catalog then stands alone -- exactly what the desktop
+            // arm has always relied on.
+            List<string> fromLabels = MrClickLabelsFor("browser", surfaceHost, fromTier);
+            bool fromAmbiguous = false;
+            AutomationElement fromItem = WebFindTargetItem(win, ctx.Picker, fromLabels, ref fromAmbiguous);
+            if (fromItem != null && WebItemSelectionState(fromItem) == WEB_SEL_NO)
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "from_tier_not_confirmed", composerEl); return; }
 
             // ── THE TARGET ITEM: exactly one, or nothing ───────────────────
             //
-            // NO "More models" SUBMENU HUNT on a web surface. The desktop path
-            // has one, and it works by MOVING THE USER'S MOUSE CURSOR over a
-            // hover flyout -- a technique that was probed against Claude
-            // Desktop and has not been probed here. All three measured
-            // claude.ai tiers are top-level items, so nothing needs it; if a
-            // future surface hides a tier behind a submenu, that tier simply
-            // reports target_item_not_found and the prompt sends unrouted.
-            int matchCount;
-            AutomationElement targetItem = FindWebPickerItemUnique(win, toLabel, ctx.Picker.ItemControlTypes, ctx.Picker.ItemSelectedPrefix, out matchCount);
+            // The catalog's labels (+ policy overrides / a rule's ui_name), most
+            // specific first; each must match EXACTLY ONE item, and the first
+            // that does is clicked. Not at the top level -> the desktop arm's
+            // "More models" hover (WebOpenMoreModelsAndFind), then search again.
+            List<string> labels = (meta != null && meta.ClickLabels != null && meta.ClickLabels.Count > 0)
+                ? meta.ClickLabels : new List<string> { toLabel };
+            bool anyAmbiguous = false;
+            AutomationElement targetItem = WebFindTargetItem(win, ctx.Picker, labels, ref anyAmbiguous);
+            if (targetItem == null)
+            {
+                bool openedMore;
+                targetItem = WebOpenMoreModelsAndFind(win, pinnedHwnd, ctx.Picker, labels, ref anyAmbiguous, out openedMore);
+            }
             if (targetItem == null)
             {
                 TryCollapsePicker(picker);
@@ -6864,72 +9280,124 @@ public static class CfaiEnforcer
                 // refusal -- never take the first, because there is no evidence
                 // available to break the tie and the cost of guessing wrong is
                 // that the user is served and billed by a model nobody chose.
-                string why = (matchCount >= 2) ? "target_item_ambiguous" : "target_item_not_found";
-                WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, why);
+                string why = anyAmbiguous ? "target_item_ambiguous" : "target_item_not_found";
+                WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, why, composerEl);
                 return;
             }
 
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_before_select"); return; }
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_before_select", composerEl); return; }
 
-            bool selected = false;
+            // Recorded BEFORE the click, so the picker change it causes is known
+            // to be ours and never counted as the user's own choice.
+            if (meta != null) MrNoteOurSwitch(meta.ChoiceKey, toTier);
+            // ACTIVATION, as the desktop arm does it: Select() first, then (if
+            // the picker has not switched shortly after) Invoke() on the same
+            // item inside RouteAwaitSwitch. The menu is NOT collapsed until the
+            // wait is over -- collapsing right after a Select() that only
+            // highlighted closes the menu having chosen nothing.
+            bool usedSelect = false, usedInvoke = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
-            { try { ((SelectionItemPattern)selObj).Select(); selected = true; } catch { } }
-            if (!selected && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
-            { try { ((InvokePattern)selObj).Invoke(); selected = true; } catch { } }
-            if (!selected)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "select_failed"); return; }
+            { try { ((SelectionItemPattern)selObj).Select(); usedSelect = true; } catch { } }
+            if (!usedSelect && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
+            { try { ((InvokePattern)selObj).Invoke(); usedInvoke = true; } catch { } }
+            if (!usedSelect && !usedInvoke)
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "select_failed", composerEl); return; }
 
             Thread.Sleep(300);
-            TryCollapsePicker(picker);   // best-effort — selecting usually closes it on its own
 
             // Re-find the button FRESH rather than trusting the cached
-            // reference: a stale reference can keep returning its last-known
-            // (pre-switch) value without ever throwing, which would make
-            // verification wait out its whole deadline for a switch that
-            // already happened. Same reasoning as the desktop path's.
+            // reference, and keep re-finding DURING the wait: a stale reference
+            // keeps returning its pre-switch value without ever throwing.
             AutomationElement verifyEl = FindWebPickerButton(win, ctx.Picker) ?? picker;
-            // Keep the POLL thread's cache current too, so the next tick of
-            // UpdateModelRouting is not re-verifying something stale.
             if (verifyEl != null) { _webPickerCached = verifyEl; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
+            long nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
 
-            // ── VERIFICATION: tier-from-label OR IsSelected ────────────────
-            //
-            // TWO independent confirmations, OR'd, and BOTH are tier-only.
-            //
-            // The label comparison is deliberately NOT `labelAfter != labelBefore`
-            // the way the desktop path's is. On this surface the label carries
-            // an EFFORT token that changes as a side effect of the switch, so a
-            // plain string inequality would report "switched" for an effort
-            // change with the same model. Comparing the DETECTED TIER to the
-            // target is the only comparison that means what it says.
-            string labelAfter = null;
-            string effortTo = "";
-            bool switched = false;
-            long verifyDeadline = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(1500).Ticks;
-            do
+            // ── THE SWITCH WAIT: the desktop arm's RouteAwaitSwitch ─────────
+            // Same loop, same bounds, same "Switch model?" auto-confirm (the
+            // catalog's hosts["claude.ai"].confirm_dialog; a host without one is
+            // never probed). Its web hands differ only where a browser demands:
+            // the probe walks THIS browser window only (another window of the
+            // same process is another browser window, not a modal), and Escape
+            // goes only into this window.
+            RouteConfirmCfg confirmCfg = MrConfirmDialogCfg("browser", surfaceHost);
+            var confirmButtons = new Dictionary<string, AutomationElement>(StringComparer.OrdinalIgnoreCase);
+            AutomationElement confirmAnchor = null;
+            var io = new RouteSwitchIo();
+            io.ReadLabel = delegate
             {
-                try { labelAfter = verifyEl.Current.Name; } catch { }
-                if (!string.IsNullOrEmpty(labelAfter))
+                string l = null;
+                try { l = verifyEl != null ? verifyEl.Current.Name : null; } catch { }
+                if (DateTime.UtcNow.Ticks >= nextRefind || string.IsNullOrEmpty(l))
                 {
-                    var afterInfo = DetectModelInfo(labelAfter);
-                    if (afterInfo != null && string.Equals(afterInfo.Tier, toTier, StringComparison.Ordinal)) { switched = true; break; }
+                    AutomationElement fresh = FindWebPickerButton(win, ctx.Picker);
+                    if (fresh != null) { verifyEl = fresh; _webPickerCached = fresh; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
+                    nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
                 }
-                if (WebItemIsSelected(targetItem)) { switched = true; break; }
-                Thread.Sleep(60);
-            } while (DateTime.UtcNow.Ticks < verifyDeadline);
-            if (!switched)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "switch_not_verified"); return; }
+                return l;
+            };
+            // TIER-ONLY, never "the label changed": on this surface the label
+            // carries an effort token that changes as a side effect. A label the
+            // catalog cannot read falls to the item's own IsSelected (claude.ai);
+            // with neither, "" -- never null, so RouteSwitchVerified cannot fall
+            // back to a plain string inequality here.
+            io.TierOf = delegate(string l)
+            {
+                string t = WebTierOfLabel(meta, ctx, l);
+                if (t != null) return t;
+                return WebItemIsSelected(targetItem) ? toTier : "";
+            };
+            io.RetryActivate = delegate
+            {
+                object invObj;
+                try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
+            };
+            io.ProbeConfirm = delegate
+            {
+                confirmButtons.Clear();
+                confirmAnchor = null;
+                return RouteProbeConfirmUia(win, confirmCfg, confirmButtons, ref confirmAnchor);
+            };
+            io.InvokeConfirm = delegate(string name)
+            {
+                AutomationElement b;
+                return confirmButtons.TryGetValue(name, out b) && RouteInvokeElement(b);
+            };
+            io.DismissConfirm = delegate
+            {
+                AutomationElement cancel = RouteFindDialogCancel(confirmAnchor, confirmCfg != null ? confirmCfg.CancelName : null);
+                if (!RouteInvokeElement(cancel))
+                {
+                    // Escape only into THIS browser window -- never another one.
+                    if (GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE);
+                }
+                Thread.Sleep(200);
+            };
+            io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+            io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+
+            RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
+            string labelAfter = waited.LabelAfter;
+            TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
+            if (!waited.Switched)
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, waited.Reason ?? "switch_not_verified", composerEl); return; }
             // Captured AFTER the switch, from the same string the tier came
             // from. "" when the label carried no recognised token.
-            effortTo = ModelEffortFromLabel(labelAfter, ctx.Picker.NamePrefix);
+            string effortTo = ModelEffortFromLabel(labelAfter, ctx.Picker.NamePrefix);
+            if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
 
-            // The dropdown interaction moves keyboard focus into the popover and
-            // does not necessarily return it. Ask UIA to put it back on the SAME
-            // element that was pinned.
-            try { composerEl.SetFocus(); } catch { }
-            Thread.Sleep(150);
+            // ── The switch landed. Never leave a menu showing: a submenu or the
+            // menu itself still open would take the Enter. ─────────────────
+            string menuWhy = WebCollapseMenuUia(pinnedHwnd, ctx);
+            if (menuWhy != null)
+            {
+                // The switch DID happen, so this is not an unrouted send; with
+                // the menu still up no Enter goes anywhere. The prompt stays
+                // visibly in the composer.
+                WebRouteFailed(provider, toTier /* now-current */, toTier, toLabel, complexity, effortFrom, effortTo, "focus_lost_after_switch_" + menuWhy);
+                return;
+            }
 
             if (GetForegroundWindow() != pinnedHwnd)
             { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "focus_changed"); return; }
@@ -6956,8 +9424,18 @@ public static class CfaiEnforcer
 
             if (NormalizeWs(afterText) == NormalizeWs(originalText))
             {
-                // The prompt survived, which is the measured behaviour. Send it.
-                WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, composerEl, originalText, effortFrom, effortTo, null);
+                // The prompt survived, which is the measured behaviour. Put
+                // keyboard focus BACK on the composer -- the desktop arm's
+                // bounded SetFocus-then-click loop, verified each step -- and
+                // only then send, exactly once.
+                string afterWhy;
+                AutomationElement focused = WebRefocusUia(pinnedHwnd, pinnedComposerRid, composerEl, originalText, out afterWhy);
+                if (focused == null)
+                {
+                    WebRouteFailed(provider, toTier /* now-current */, toTier, toLabel, complexity, effortFrom, effortTo, "focus_lost_after_switch_" + afterWhy);
+                    return;
+                }
+                WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, focused, originalText, effortFrom, effortTo, null);
                 return;
             }
 
@@ -6979,14 +9457,19 @@ public static class CfaiEnforcer
             // for line breaks rather than typing a '\\n' a page may treat as
             // send -- then READ IT BACK and only send on an EXACT match.
             //
-            // No Ctrl+A/Delete first: the composer already read as empty, and
-            // clearing something we believe is empty can only ever destroy
-            // something we were wrong about.
+            // Keystrokes go to whatever has keyboard focus, so it is put on the
+            // composer first (SetFocus, then one click inside it if focus did
+            // not move), and the retype does not start unless it is there.
             //
             // UpdateModelRouting refused to ARM at all for a prompt that does
             // not fit the write budget, so reaching here means the retype was
             // always affordable -- "we never swallow an Enter for a prompt we
             // could not put back."
+            try { composerEl.SetFocus(); } catch { }
+            Thread.Sleep(150);
+            if (!WebFocusIsInComposer(pinnedComposerRid)) { RouteClickInto(composerEl, pinnedHwnd); Thread.Sleep(120); }
+            if (!WebFocusIsInComposer(pinnedComposerRid))
+            { WebRouteFailed(provider, toTier /* now-current */, toTier, toLabel, complexity, effortFrom, effortTo, "focus_lost_after_switch_focus_not_in_composer"); return; }
             if (!WebRestoreComposer(composerEl, originalText, pinnedHwnd, ctx))
             {
                 // The retype did not read back exactly. STOP. Whatever is in the
@@ -7006,13 +9489,28 @@ public static class CfaiEnforcer
             // desktop path's. An exception means this code does not know what
             // state the page is in, and a synthetic Enter into an unknown state
             // is how a prompt lands in the wrong conversation. The text stays in
-            // the composer; the user presses Enter again.
+            // the composer; the user presses Enter again. A model menu we may
+            // have opened is still closed first.
+            try { WebCollapseMenuUia(pinnedHwnd, ctx); } catch { }
             WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "exception");
         }
         finally
         {
+            _activeRouteMeta = null;
             _routeInProgress = false;
         }
+    }
+
+    // The tier a web picker label shows: the shared catalog first (what the
+    // desktop arm and the extension read), the surface's own button table as
+    // the fallback (gemini's 'currently Flash'). null when neither reads it.
+    static string WebTierOfLabel(RouteMeta meta, RouteCtx ctx, string label)
+    {
+        if (string.IsNullOrEmpty(label)) return null;
+        string host = meta != null ? meta.HostOrApp : (ctx != null ? ctx.Host : null);
+        string t = MrTierOfLabel(meta != null ? meta.Surface : "browser", host ?? "", label);
+        if (t == null && ctx != null) { int bt = ResolveButtonTier(label, ctx.Picker); if (bt > 0) t = MrTierName(bt); }
+        return t;
     }
 
     // Nothing was sent and nothing will be. Clears the pin so a held Enter
@@ -7035,7 +9533,7 @@ public static class CfaiEnforcer
     // happened. Only a genuine change of focus, host, page instance or content
     // declines.
     static void WebFallbackSendOrReport(RouteCtx ctx, string provider, string fromTier, string toTier, string toLabel, string complexity,
-        IntPtr pinnedHwnd, int[] pinnedComposerRid, string originalText, string effortFrom, string reason)
+        IntPtr pinnedHwnd, int[] pinnedComposerRid, string originalText, string effortFrom, string reason, AutomationElement knownComposer)
     {
         // Cleared unconditionally and FIRST, whether or not the send below
         // works: one attempt per Enter, always.
@@ -7048,15 +9546,36 @@ public static class CfaiEnforcer
         if (ctx != null && !string.Equals(_fgWebHost ?? "", ctx.Host ?? "", StringComparison.Ordinal))
         { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_host_changed", effortFrom); return; }
 
-        // THE ONE DOOR again -- never FocusedElement.
-        AutomationElement el = CachedWebComposer();
-        if (el == null)
+        // NEVER LEAVE THE MENU OPEN, AND NEVER PRESS ENTER INTO IT. Live
+        // (1307630, claude.ai): ExpandCollapse.Collapse() left the model menu
+        // showing, the Enter below landed in it, and the prompt sat unsent
+        // (from_tier_not_confirmed_fallback_not_submitted). A menu that cannot
+        // be closed means no Enter at all.
+        string menuWhy = WebCollapseMenuUia(pinnedHwnd, ctx);
+        if (menuWhy != null)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + menuWhy, effortFrom); return; }
+
+        // THE ONE DOOR again -- never FocusedElement. The element it returned
+        // at pre-flight, else the door now; WebRefocusUia insists on the pinned
+        // RuntimeId and on exactly the pinned prompt.
+        AutomationElement door = CachedWebComposer();
+        AutomationElement known = knownComposer ?? door;
+        if (known == null)
         { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_no_element", effortFrom); return; }
-        int[] rid = null; string text = null;
-        try { rid = el.GetRuntimeId(); } catch { }
-        try { text = ReadText(el); } catch { }
-        if (!RuntimeIdEquals(rid, pinnedComposerRid) || NormalizeWs(text) != NormalizeWs(originalText))
-        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_text_changed", effortFrom); return; }
+
+        // Keyboard focus back on the composer -- the desktop arm's bounded
+        // SetFocus-then-click loop -- before the one Enter. It refuses on its
+        // own when another window took the foreground (focus_changed) or the
+        // user edited the text (text_changed).
+        string whyNot;
+        AutomationElement el = WebRefocusUia(pinnedHwnd, pinnedComposerRid, known, originalText, out whyNot);
+        if (el == null)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + whyNot, effortFrom); return; }
+        // The refocus took time: the window and page checks again, immediately before Enter.
+        if (GetForegroundWindow() != pinnedHwnd)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed", effortFrom); return; }
+        if (ctx != null && _browserNavGen != ctx.NavGen)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_navigated", effortFrom); return; }
 
         Emit("prompt", _app, "", "send", originalText.Length);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
@@ -7207,6 +9726,18 @@ public static class CfaiEnforcer
     //   {"cmd":"evidence_dlp","state":"on"|"off"}
     //       The fleet `dlp` flag for the AI-evidence routes — see
     //       _evidenceDlpOn. A bare on/off.
+    //
+    //   {"cmd":"router_policy","policy":{...}|[...]|null}
+    //       The routing policy document (GET /api/v1/routing/policy) or the
+    //       legacy rules array. Replaces _mrPolicy whole; it is decision data
+    //       for the decideRoute port and nothing in it is ever typed or sent.
+    //
+    //   {"cmd":"router_fleet","state":"on"|"off"}
+    //       The fleet `model_routing` flag. A bare on/off.
+    //
+    //   {"cmd":"routing_owner","process":"chrome","ttl_ms":N}
+    //       The browser extension routes in that browser; the web arm stands
+    //       down there for ttl_ms (capped at 120s). 0 releases it.
     // ======================= BROWSER SURFACES ==============================
     //
     // "Which HOST is this browser tab on", and blocking a send on it.
@@ -8399,6 +10930,11 @@ public static class CfaiEnforcer
     // per host. One claude.ai account shows Fable 5.1 and another does not; a
     // ChatGPT Go account has no picker at all. A tier with no label simply does
     // not arm a route.
+    //
+    // NOT on the route path any more: RunWebRoute reads EVERY catalog click
+    // label for a tier (MrClickLabelsFor) -- the same labels the desktop arm
+    // and the extension use. This one flattened label per tier is what the
+    // payload carries (ai-processes.js catalogTierLabels, itself catalog-derived).
     static string WebPickerTierLabel(WebPicker p, int tierNum)
     {
         if (p == null) return "";
@@ -10289,6 +12825,29 @@ public static class CfaiEnforcer
                         if (state == "on") _evidenceDlpOn = true;
                         else if (state == "off") _evidenceDlpOn = false;
                     }
+                    else if (cmd == "router_policy")
+                    {
+                        // The routing policy changed on the server. Replaced
+                        // WHOLE, in place -- no respawn, so keystroke protection
+                        // never drops for a policy edit. Parsed as JSON by
+                        // ApplyRouterPolicyLine; a malformed line keeps the old
+                        // policy.
+                        ApplyRouterPolicyLine(line);
+                    }
+                    else if (cmd == "router_fleet")
+                    {
+                        // The fleet model_routing switch. A bare on/off.
+                        string state = ExtractJsonString(line, "state");
+                        if (state == "on") _mrFleetEnabled = true;
+                        else if (state == "off") { _mrFleetEnabled = false; ClearPendingRoute(); }
+                    }
+                    else if (cmd == "routing_owner")
+                    {
+                        // The browser extension owns routing in this browser
+                        // process for ttl_ms (capped). A process NAME and a
+                        // number, nothing else.
+                        ApplyRoutingOwner(ExtractJsonString(line, "process"), ExtractJsonNumber(line, "ttl_ms", 0));
+                    }
                 }
                 catch { }
             }
@@ -10996,6 +13555,12 @@ public static class CfaiEnforcer
                     if (_rewriteInProgress || _routeInProgress)
                     {
                         uint kflags = (uint)Marshal.ReadInt32(lParam, 8);   // KBDLLHOOKSTRUCT.flags
+                        // A held / second Enter in the route's own window:
+                        // swallowed, and NOT an abort -- the running route
+                        // sends the prompt exactly once. No UIA, one Win32 call.
+                        if (RouteHookSwallowsEnter(vk, ctrl, alt, shift, (kflags & LLKHF_INJECTED) != 0,
+                                _routeInProgress, _rewriteInProgress, GetForegroundWindow() == _activeRouteHwnd))
+                            return (IntPtr)1;
                         if ((kflags & LLKHF_INJECTED) == 0)
                         {
                             if (_rewriteInProgress) _rewriteAbort = true;
@@ -11309,8 +13874,10 @@ public static class CfaiEnforcer
                                 lock (_routeLock) { routeId = _pendingRouteId; routeArmed = _pendingRouteArmed; }
                                 if (routeArmed && !string.IsNullOrEmpty(routeId) && !_rewriteInProgress)
                                 {
-                                    StartRoute(routeId);
-                                    return (IntPtr)1;
+                                    // Swallowed ONLY when a route took it (and so
+                                    // owns re-sending it); an expired or stale pin
+                                    // falls through to the ordinary send below.
+                                    if (StartRoute(routeId)) return (IntPtr)1;
                                 }
 
                                 // Clean send — capture the prompt (LENGTH ONLY, no
@@ -11320,6 +13887,7 @@ public static class CfaiEnforcer
                                 // on Claude Desktop where UIA can't read the composer.
                                 int len = TypedLength();
                                 if (len >= 1) { Emit("prompt", _app, "", "send", len); }
+                                EmitRouteNote();   // a pre-built noop/suggested/observed line, if any
                                 TypedClear(); _blockTyped = false; _typedPatterns = "";
                             }
                         }

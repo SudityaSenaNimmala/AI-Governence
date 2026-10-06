@@ -1,0 +1,631 @@
+{
+  "_comment": [
+    "Shared complexity-classifier corpus. Every prompt is classified by the canonical",
+    "browser-extension/content/complexity.js (classifyDetailed) AND by the desktop enforcer's",
+    "C# port (ClassifyComplexityDetailed, compiled out of agent/src/os_monitor/enforcer-win.ps1),",
+    "and agent/tests/complexity-lockstep.test.mjs requires verdict, rule and score to be identical.",
+    "`expect` (optional) pins the intended verdict; browser-extension/tests/complexity.test.mjs",
+    "checks it against the canonical classifier. A changed expectation is a billing change."
+  ],
+  "cases": [
+    {
+      "id": "greeting-001",
+      "group": "greeting",
+      "text": "hi",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-002",
+      "group": "greeting",
+      "text": "hello",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-003",
+      "group": "greeting",
+      "text": "hey",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-004",
+      "group": "greeting",
+      "text": "Hi!",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-005",
+      "group": "greeting",
+      "text": "hello there",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-006",
+      "group": "greeting",
+      "text": "hey there",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-007",
+      "group": "greeting",
+      "text": "good morning",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-008",
+      "group": "greeting",
+      "text": "Good morning!",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-009",
+      "group": "greeting",
+      "text": "good afternoon",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-010",
+      "group": "greeting",
+      "text": "good evening",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-011",
+      "group": "greeting",
+      "text": "good night",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-012",
+      "group": "greeting",
+      "text": "thanks",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-013",
+      "group": "greeting",
+      "text": "thank you",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-014",
+      "group": "greeting",
+      "text": "thank you so much",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-015",
+      "group": "greeting",
+      "text": "thanks a lot!",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-016",
+      "group": "greeting",
+      "text": "ok",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-017",
+      "group": "greeting",
+      "text": "okay",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-018",
+      "group": "greeting",
+      "text": "ok thanks!",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-019",
+      "group": "greeting",
+      "text": "bye",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-020",
+      "group": "greeting",
+      "text": "see you later",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-021",
+      "group": "greeting",
+      "text": "how are you",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-022",
+      "group": "greeting",
+      "text": "how are you doing today?",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-023",
+      "group": "greeting",
+      "text": "what's up",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-024",
+      "group": "greeting",
+      "text": "what’s up?",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-025",
+      "group": "greeting",
+      "text": "nice to meet you",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-026",
+      "group": "greeting",
+      "text": "great job, thanks claude",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-027",
+      "group": "greeting",
+      "text": "no worries",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-028",
+      "group": "greeting",
+      "text": "sounds good 👍",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-029",
+      "group": "greeting",
+      "text": "yes",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-030",
+      "group": "greeting",
+      "text": "no",
+      "expect": "simple"
+    },
+    {
+      "id": "greeting-031",
+      "group": "greeting",
+      "text": "cheers mate",
+      "expect": "simple"
+    },
+    {
+      "id": "mixed-032",
+      "group": "mixed",
+      "text": "hi, can you design a distributed cache?",
+      "expect": "complex"
+    },
+    {
+      "id": "mixed-033",
+      "group": "mixed",
+      "text": "hi, please do deep research on EU AI regulation",
+      "expect": "complex"
+    },
+    {
+      "id": "mixed-034",
+      "group": "mixed",
+      "text": "good morning, can you design a distributed cache?",
+      "expect": "complex"
+    },
+    {
+      "id": "mixed-035",
+      "group": "mixed",
+      "text": "thanks, now explain how kubernetes networking works"
+    },
+    {
+      "id": "mixed-036",
+      "group": "mixed",
+      "text": "hello! write a python function to parse CSV"
+    },
+    {
+      "id": "mixed-037",
+      "group": "mixed",
+      "text": "hey what is the difference between these two approaches"
+    },
+    {
+      "id": "mixed-038",
+      "group": "mixed",
+      "text": "my build is broken and I have no clue where to start"
+    },
+    {
+      "id": "mixed-039",
+      "group": "mixed",
+      "text": "ok so where should I put the new module"
+    },
+    {
+      "id": "mixed-040",
+      "group": "mixed",
+      "text": "thanks for the help with the kubernetes migration"
+    },
+    {
+      "id": "mixed-041",
+      "group": "mixed",
+      "text": "sorry, that is wrong"
+    },
+    {
+      "id": "mixed-042",
+      "group": "mixed",
+      "text": "there",
+      "expect": "moderate"
+    },
+    {
+      "id": "arithmetic-043",
+      "group": "arithmetic",
+      "text": "what is 2+2",
+      "expect": "simple"
+    },
+    {
+      "id": "arithmetic-044",
+      "group": "arithmetic",
+      "text": "2+2",
+      "expect": "simple"
+    },
+    {
+      "id": "arithmetic-045",
+      "group": "arithmetic",
+      "text": "12 x 7",
+      "expect": "simple"
+    },
+    {
+      "id": "arithmetic-046",
+      "group": "arithmetic",
+      "text": "what is 15% of 240",
+      "expect": "simple"
+    },
+    {
+      "id": "arithmetic-047",
+      "group": "arithmetic",
+      "text": "8÷2",
+      "expect": "simple"
+    },
+    {
+      "id": "arithmetic-048",
+      "group": "arithmetic",
+      "text": "how much is 100 / 4",
+      "expect": "simple"
+    },
+    {
+      "id": "arithmetic-049",
+      "group": "arithmetic",
+      "text": "42",
+      "expect": "moderate"
+    },
+    {
+      "id": "arithmetic-050",
+      "group": "arithmetic",
+      "text": "3.14",
+      "expect": "moderate"
+    },
+    {
+      "id": "arithmetic-051",
+      "group": "arithmetic",
+      "text": "explain why 2+2=4 in Peano arithmetic"
+    },
+    {
+      "id": "plain-052",
+      "group": "plain",
+      "text": "explain what an API is"
+    },
+    {
+      "id": "plain-053",
+      "group": "plain",
+      "text": "capital of France",
+      "expect": "moderate"
+    },
+    {
+      "id": "plain-054",
+      "group": "plain",
+      "text": "who wrote Hamlet",
+      "expect": "moderate"
+    },
+    {
+      "id": "plain-055",
+      "group": "plain",
+      "text": "summarize this email",
+      "expect": "moderate"
+    },
+    {
+      "id": "plain-056",
+      "group": "plain",
+      "text": "Write a haiku about autumn",
+      "expect": "moderate"
+    },
+    {
+      "id": "plain-057",
+      "group": "plain",
+      "text": "zxqv wobble frimble",
+      "expect": "moderate"
+    },
+    {
+      "id": "simple_task-058",
+      "group": "simple_task",
+      "text": "define idempotent",
+      "expect": "simple"
+    },
+    {
+      "id": "simple_task-059",
+      "group": "simple_task",
+      "text": "translate this to French: Hello, how are you?",
+      "expect": "simple"
+    },
+    {
+      "id": "simple_task-060",
+      "group": "simple_task",
+      "text": "fix typo in the readme"
+    },
+    {
+      "id": "simple_task-061",
+      "group": "simple_task",
+      "text": "explain cloud computing in simple words",
+      "expect": "simple"
+    },
+    {
+      "id": "simple_task-062",
+      "group": "simple_task",
+      "text": "briefly, what is a hypothesis?",
+      "expect": "simple"
+    },
+    {
+      "id": "simple_task-063",
+      "group": "simple_task",
+      "text": "tell me a joke",
+      "expect": "simple"
+    },
+    {
+      "id": "research-064",
+      "group": "research",
+      "text": "Write a literature review on transformer models",
+      "expect": "complex"
+    },
+    {
+      "id": "research-065",
+      "group": "research",
+      "text": "research the regulatory history of GDPR fines and cite sources",
+      "expect": "complex"
+    },
+    {
+      "id": "research-066",
+      "group": "research",
+      "text": "Do a systematic review of remote-work productivity studies",
+      "expect": "complex"
+    },
+    {
+      "id": "research-067",
+      "group": "research",
+      "text": "Investigate why churn increased and weigh the evidence",
+      "expect": "complex"
+    },
+    {
+      "id": "research-068",
+      "group": "research",
+      "text": "Prove that the square root of 2 is irrational",
+      "expect": "complex"
+    },
+    {
+      "id": "research-069",
+      "group": "research",
+      "text": "deep research: EU battery regulation",
+      "expect": "complex"
+    },
+    {
+      "id": "research-070",
+      "group": "research",
+      "text": "Research the history of the printing press",
+      "expect": "moderate"
+    },
+    {
+      "id": "research-071",
+      "group": "research",
+      "text": "proofread this paragraph",
+      "expect": "moderate"
+    },
+    {
+      "id": "research-072",
+      "group": "research",
+      "text": "1. what changed\n2. why it matters\n3. what we should do next",
+      "expect": "complex"
+    },
+    {
+      "id": "code-073",
+      "group": "code",
+      "text": "write a python function to reverse a string",
+      "expect": "moderate"
+    },
+    {
+      "id": "code-074",
+      "group": "code",
+      "text": "debug this race condition in the scheduler"
+    },
+    {
+      "id": "code-075",
+      "group": "code",
+      "text": "```js\nconst x = 1;\n```\nwhy is this failing"
+    },
+    {
+      "id": "code-076",
+      "group": "code",
+      "text": "Traceback (most recent call last):\n  File \"app.py\", line 12, in <module>\n    main()\nIndexError: list index out of range",
+      "expect": "complex"
+    },
+    {
+      "id": "code-077",
+      "group": "code",
+      "text": "Exception in thread \"main\" java.lang.NullPointerException\n\tat com.example.Main.main(Main.java:12)"
+    },
+    {
+      "id": "code-078",
+      "group": "code",
+      "text": "import os\nprint(os.listdir())"
+    },
+    {
+      "id": "code-079",
+      "group": "code",
+      "text": "refactor the N+1 query in module 3"
+    },
+    {
+      "id": "code-080",
+      "group": "code",
+      "text": "implement an OAuth endpoint with unit tests"
+    },
+    {
+      "id": "hard-081",
+      "group": "hard",
+      "text": "what's our architecture for the billing service?",
+      "expect": "complex"
+    },
+    {
+      "id": "hard-082",
+      "group": "hard",
+      "text": "design a multi-tenant migration plan with rollback",
+      "expect": "complex"
+    },
+    {
+      "id": "hard-083",
+      "group": "hard",
+      "text": "explain zero-trust architecture in simple terms",
+      "expect": "moderate"
+    },
+    {
+      "id": "hard-084",
+      "group": "hard",
+      "text": "Why does this deadlock under load?",
+      "expect": "complex"
+    },
+    {
+      "id": "hard-085",
+      "group": "hard",
+      "text": "check the vpc and iam settings for zero trust and algorithms",
+      "expect": "complex"
+    },
+    {
+      "id": "long-086",
+      "group": "long",
+      "text": "Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. Explain cloud computing in simple words. ",
+      "expect": "simple"
+    },
+    {
+      "id": "long-087",
+      "group": "long",
+      "text": "architecture the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. ",
+      "expect": "complex"
+    },
+    {
+      "id": "long-088",
+      "group": "long",
+      "text": "the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog.  zero-trust architecture the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. the quick brown fox jumps over the lazy dog. ",
+      "expect": "moderate"
+    },
+    {
+      "id": "long-089",
+      "group": "long",
+      "text": "thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks thanks ",
+      "expect": "simple"
+    },
+    {
+      "id": "edge-090",
+      "group": "edge",
+      "text": "",
+      "expect": "moderate"
+    },
+    {
+      "id": "edge-091",
+      "group": "edge",
+      "text": "   ",
+      "expect": "moderate"
+    },
+    {
+      "id": "edge-092",
+      "group": "edge",
+      "text": "\n\n",
+      "expect": "moderate"
+    },
+    {
+      "id": "edge-093",
+      "group": "edge",
+      "text": "réarchitecture",
+      "expect": "complex"
+    },
+    {
+      "id": "edge-094",
+      "group": "edge",
+      "text": "why does this deadlock",
+      "expect": "complex"
+    },
+    {
+      "id": "edge-095",
+      "group": "edge",
+      "text": "find the root cause"
+    },
+    {
+      "id": "edge-096",
+      "group": "edge",
+      "text": "ok 𝒜𝒜",
+      "expect": "moderate"
+    },
+    {
+      "id": "edge-097",
+      "group": "edge",
+      "text": "こんにちは、システム設計について教えてください",
+      "expect": "moderate"
+    },
+    {
+      "id": "edge-098",
+      "group": "edge",
+      "text": "ok สวัสดีครับ",
+      "expect": "moderate"
+    },
+    {
+      "id": "edge-099",
+      "group": "edge",
+      "text": "ok 🙂",
+      "expect": "simple"
+    },
+    {
+      "id": "edge-100",
+      "group": "edge",
+      "text": "﻿hi",
+      "expect": "simple"
+    },
+    {
+      "id": "edge-101",
+      "group": "edge",
+      "text": "hi there",
+      "expect": "simple"
+    },
+    {
+      "id": "edge-102",
+      "group": "edge",
+      "text": "OKay"
+    },
+    {
+      "id": "edge-103",
+      "group": "edge",
+      "text": "Hİ"
+    },
+    {
+      "id": "edge-104",
+      "group": "edge",
+      "text": "٢+٢"
+    },
+    {
+      "id": "edge-105",
+      "group": "edge",
+      "text": "why find the rootcause"
+    },
+    {
+      "id": "edge-106",
+      "group": "edge",
+      "text": "hi‍"
+    },
+    {
+      "id": "edge-107",
+      "group": "edge",
+      "text": "café good morning"
+    }
+  ]
+}

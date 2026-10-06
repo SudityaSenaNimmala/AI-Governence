@@ -26,9 +26,10 @@
 //     'moderate'. Length is not difficulty. There is no length input anywhere
 //     in this file.
 //
-// What replaces it: a weighted lexicon of eleven categories (eight positive
+// What replaces it: a weighted lexicon of thirteen categories (ten positive
 // signals, three negative) plus a few structural signals (code fences, stack
-// traces). Score maps to one of exactly three tiers.
+// traces, enumerated multi-part questions). Score maps to one of exactly three
+// tiers.
 //
 // PRIVACY: this file reads prompt text and returns a single enum. It never
 // stores it, never logs it, and deliberately returns no matched terms — those
@@ -46,7 +47,18 @@
 
   // 1.2.0 — added the pure-arithmetic shape test (step 3b). Bumped because this
   // changes verdicts: a bare sum was 'moderate' via the no-opinion fallback.
-  const VERSION = '1.2.0';
+  // 1.3.0 — added the researchDepth category (lexicon + one structural signal):
+  // multi-step reasoning, research, source comparison/evaluation, proofs. Routing
+  // now goes BOTH ways by how demanding a prompt is, so a research-style ask must
+  // reach 'complex' (premium) instead of sitting on the no-opinion 'moderate'.
+  // 1.4.0 — added the small-talk shape test (step 3c): a message that is nothing
+  // but greetings / pleasantries ("good morning", "hello there", "how are you",
+  // "thanks so much") is 'simple'. Before it, anything with one non-greeting word
+  // ("good", "morning", "there") scored 0 and fell to the no-opinion 'moderate',
+  // so a "good morning" on a premium model was routed DOWN only to standard.
+  // Also moved the arithmetic regexes into ARITHMETIC_SHAPE (same patterns) so
+  // the desktop enforcer receives them as data, and added classifyDetailed().
+  const VERSION = '1.4.0';
 
   // Tier thresholds. Tuned against the acceptance table in tests/complexity.test.mjs.
   const COMPLEX_AT = 6;
@@ -228,6 +240,48 @@
     ['proposal', 2],
   ];
 
+  // Research / reasoning depth (1.3.0). The ask is to INVESTIGATE, not just to
+  // answer: multi-step reasoning, research, comparing or weighing sources and
+  // evidence, proofs. These are the prompts that genuinely need the premium tier,
+  // and before this category most of them ("research the regulatory history of
+  // X and cite sources") matched nothing and fell to 'moderate'.
+  //
+  // Weight 6 is reserved for phrases that name a research DELIVERABLE outright
+  // ("literature review", "meta-analysis", "deep research") — like architect*,
+  // each is enough on its own to clear COMPLEX_AT. Everything else is 2–4, so
+  // reaching complex takes two distinct signals.
+  //
+  // `proof*` is NOT a stem on purpose: it would eat "proofread", which is the
+  // opposite of a demanding ask. `proof`/`proofs` are spelled out.
+  const RESEARCH_DEPTH = [
+    ['deep research', 6],
+    ['literature review*', 6],
+    ['systematic review*', 6],
+    ['meta-analys*', 6], ['meta analys*', 6],
+    ['research*', 4],
+    ['investigat*', 3],
+    ['cite sources', 4], ['cite your sources', 4], ['with citations', 4],
+    ['citations', 3],
+    ['primary sources', 3], ['credible sources', 3],
+    ['evaluate the evidence', 4], ['weigh the evidence', 4],
+    ['evidence', 2],
+    ['counterargument*', 4], ['counter-argument*', 4],
+    ['multi-step', 3], ['multi step', 3], ['multistep', 3],
+    ['reason through', 4], ['chain of reasoning', 4],
+    ['reason about', 3],
+    ['hypothes*', 3],
+    ['proof', 4], ['proofs', 4],
+    ['prove that', 3],
+    ['theorem*', 4],
+    ['lemma', 3],
+    ['synthesi*', 3],
+    ['state of the art', 3], ['state-of-the-art', 3],
+    ['methodolog*', 3],
+    ['critically', 3],
+    ['forecast*', 3],
+    ['nuanced', 2],
+  ];
+
   // Catch-all for real-but-easy asks, so they land above a bare 0 and are
   // distinguishable from "no signal at all". Overlap with the categories above
   // is deliberate and harmless: the per-category cap bounds what any single idea
@@ -292,6 +346,22 @@
     { key: '#error-label', weight: 4, re: /\bError:/ },
   ];
 
+  // A question broken into three or more numbered parts ("1. … 2. … 3. …") is
+  // the shape of a research brief. This is SHAPE, not length: a 30-character
+  // three-part list fires it and a 3000-character paragraph does not.
+  //
+  // Deliberately NOT "three or more question marks". That reads as structure but
+  // is really a repetition count — pasting one question twenty times would add
+  // the signal, breaking the invariant that repeating the same content never
+  // moves a verdict (tests/complexity.test.mjs pins it).
+  //
+  // Kept to constructs .NET's Regex accepts unchanged: the desktop enforcer
+  // compiles these sources from CFAI_MODEL_ROUTER_CONFIG
+  // (agent/src/os_monitor/model-router-config.js).
+  const RESEARCH_STRUCTURE = [
+    { key: '#enumerated-parts', weight: 3, re: /(^|\n)[ \t]*3[.)][ \t]+\S/ },
+  ];
+
   // ── Pure arithmetic ────────────────────────────────────────────────────────
   //
   // "what is 2+2" used to come out 'moderate', and not because anything judged
@@ -309,30 +379,108 @@
   // why in peano arithmetic' survives the strip, so real words remain and the
   // prompt goes on to be scored normally.
 
-  // The interrogative scaffolding around a sum, and the words for operators.
-  const ARITH_WRAPPER_RE = new RegExp(
-    '\\b(?:what(?:\\s+is|\\s*\'s|s)?|how\\s+much\\s+is|calculate|compute|'
-    + 'plus|minus|times|multiplied\\s+by|divided\\s+by|equals?|percent|of|is|the|answer|to)\\b',
-    'gi',
-  );
-  // Digits and the symbols of arithmetic. `x` and `X` are included because
-  // people write "12 x 7"; a bare letter is not otherwise allowed through.
-  const ARITH_RESIDUE_RE = /^[\s\d+\-*/^%().,=:?xX×÷]*$/;
-  // At least one digit AND one operator, so a bare number ("42") — which is an
-  // answer or an id, not a question — is not swept up.
-  const ARITH_HAS_OP_RE = /[+\-*/^%×÷]|\bx\b/i;
+  // One object literal of regex LITERALS so the desktop enforcer receives the
+  // exact patterns as data (model-router-config.js slices this declaration out
+  // and ships {source, flags}); nothing here is re-typed in C#. Keep every
+  // pattern to constructs .NET's Regex accepts once \b \w \d \s are translated
+  // to their JS (ASCII / JS-whitespace) meanings — see MrJsRegexToNet there.
+  const ARITHMETIC_SHAPE = {
+    // The interrogative scaffolding around a sum, and the words for operators.
+    wrapper: /\b(?:what(?:\s+is|\s*'s|s)?|how\s+much\s+is|calculate|compute|plus|minus|times|multiplied\s+by|divided\s+by|equals?|percent|of|is|the|answer|to)\b/gi,
+    // Digits and the symbols of arithmetic. `x` and `X` are included because
+    // people write "12 x 7"; a bare letter is not otherwise allowed through.
+    residue: /^[\s\d+\-*/^%().,=:?xX×÷]*$/,
+    // At least one digit AND one operator, so a bare number ("42") — which is an
+    // answer or an id, not a question — is not swept up.
+    hasOperator: /[+\-*/^%×÷]|\bx\b/i,
+    digit: /\d/,
+  };
 
   function isPureArithmetic(sample) {
     const s = String(sample || '');
-    if (!/\d/.test(s)) return false;
-    if (!ARITH_HAS_OP_RE.test(s)) return false;
-    const residue = s.replace(ARITH_WRAPPER_RE, ' ');
-    return ARITH_RESIDUE_RE.test(residue);
+    if (!ARITHMETIC_SHAPE.digit.test(s)) return false;
+    if (!ARITHMETIC_SHAPE.hasOperator.test(s)) return false;
+    const residue = s.replace(ARITHMETIC_SHAPE.wrapper, ' ');
+    return ARITHMETIC_SHAPE.residue.test(residue);
+  }
+
+  // ── Small talk ─────────────────────────────────────────────────────────────
+  //
+  // "good morning", "hello there", "how are you", "thanks so much" all came out
+  // 'moderate' (1.3.0): "good"/"morning"/"there" are not greeting TOKENS, so the
+  // step-3 fast path refused them, and nothing in the lexicon scored them, so
+  // they landed on the no-opinion fallback.
+  //
+  // Same kind of rule as the arithmetic test above — a SHAPE test, not a length
+  // test: remove every small-talk phrase, then every filler word that only ever
+  // rides along with one ("there", "so much", "team", "claude"), and ask whether
+  // any WORD (a letter or digit, any script) is left. If nothing is left and at
+  // least one real small-talk phrase was present, the message is small talk.
+  //
+  // What this deliberately does NOT do: "hi, please do deep research on X" keeps
+  // "please do deep research on x" — real words survive, so it is scored normally
+  // (and the greeting does not earn the -8 either; see trivialDominates). Filler
+  // alone ("there", "team") is not small talk: a core phrase must be present.
+  //
+  // Plain strings. A space matches any whitespace run (phraseSource), matching is
+  // case-insensitive at word boundaries, and typographic apostrophes are folded
+  // to ' first. Shipped to the desktop enforcer as data (model-router-config.js).
+  // Strings containing an apostrophe use double quotes.
+  const SMALL_TALK = [
+    // greetings
+    'hi', 'hello', 'hey', 'hiya', 'howdy', 'yo', 'greetings', 'hey there', 'hi there', 'hello there',
+    'good morning', 'good afternoon', 'good evening', 'good day', 'morning', 'evening', 'gm',
+    // how are you
+    'how are you', 'how are u', 'how r u', "how're you", 'how are you doing', 'how are things',
+    "how's it going", 'hows it going', 'how is it going', "how's your day", 'how is your day',
+    'how have you been', "what's up", 'whats up', 'wassup', 'sup',
+    'nice to meet you', 'pleased to meet you',
+    "i'm good", 'im good', 'i am good', "i'm fine", 'i am fine', 'doing well', 'doing good', 'not bad',
+    // thanks
+    'thanks', 'thank you', 'thank u', 'thx', 'ty', 'tysm', 'cheers', 'much appreciated',
+    'appreciate it', 'appreciated', "you're welcome", 'youre welcome',
+    'good job', 'great job', 'nice work', 'well done',
+    // acknowledgements
+    'ok', 'okay', 'k', 'kk', 'cool', 'great', 'nice', 'awesome', 'perfect', 'got it', 'gotcha',
+    'understood', 'sounds good', 'makes sense', 'np', 'no problem', 'no worries', 'alright', 'all right',
+    'yes', 'yep', 'yeah', 'yup', 'sure', 'no', 'nope', 'nah', 'sorry', 'lol', 'haha',
+    // goodbyes
+    'bye', 'goodbye', 'good bye', 'bye bye', 'see you', 'see ya', 'see you later', 'cya', 'later',
+    'take care', 'talk soon', 'ttyl', 'good night', 'goodnight',
+    'have a nice day', 'have a good day', 'have a great day',
+  ];
+
+  // Words that carry no ask of their own and only ever ride along with small
+  // talk. Never sufficient alone (see isSmallTalk).
+  const SMALL_TALK_FILLER = [
+    'there', 'again', 'all', 'everyone', 'everybody', 'guys', 'folks', 'team', 'friend', 'buddy',
+    'mate', 'dear', 'so', 'much', 'very', 'a', 'lot', 'lots', 'the', 'for', 'your', 'my', 'help',
+    'today', 'tonight', 'tomorrow', 'too', 'and', 'oh', 'ah', 'well', 'please', 'pls', 'plz',
+    'claude', 'chatgpt', 'gemini', 'copilot', 'assistant', 'bot',
+  ];
+
+  function phraseAlternation(list) {
+    // Longest first, for the same first-match-wins reason as compileCategory.
+    return list.slice().sort((a, b) => b.length - a.length).map(phraseSource).join('|');
+  }
+
+  const SMALL_TALK_RE = new RegExp('\\b(?:' + phraseAlternation(SMALL_TALK) + ')\\b', 'gi');
+  const SMALL_TALK_FILLER_RE = new RegExp('\\b(?:' + phraseAlternation(SMALL_TALK_FILLER) + ')\\b', 'gi');
+  // A letter or a digit, in any script — "is there a WORD left?".
+  const WORD_LEFT_RE = /[\p{L}\p{N}]/u;
+
+  function isSmallTalk(sample) {
+    const s = String(sample || '').replace(/[\u2018\u2019\u02bc]/g, "'");
+    let phrases = 0;
+    const residue = s
+      .replace(SMALL_TALK_RE, () => { phrases++; return ' '; })
+      .replace(SMALL_TALK_FILLER_RE, ' ');
+    return phrases > 0 && !WORD_LEFT_RE.test(residue);
   }
 
   // ── Compilation ────────────────────────────────────────────────────────────
-  // One alternation regex per category rather than one regex per term: eleven
-  // matchAll passes over the window instead of ~200 independent scans.
+  // One alternation regex per category rather than one regex per term: one
+  // matchAll pass per category over the window instead of ~250 independent scans.
 
   function escapeRe(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -406,6 +554,7 @@
     compileCategory('debugging', DEBUGGING, STACK_STRUCTURE),
     compileCategory('analysis', ANALYSIS),
     compileCategory('outputComplexity', OUTPUT_COMPLEXITY),
+    compileCategory('researchDepth', RESEARCH_DEPTH, RESEARCH_STRUCTURE),
     compileCategory('shallowTask', SHALLOW_TASK),
   ];
 
@@ -579,30 +728,40 @@
   // ── Entry point ────────────────────────────────────────────────────────────
 
   /**
+   * The decision procedure, plus WHICH rule decided and (for the scored steps)
+   * the score. No prompt text and no matched terms ever leave this function —
+   * only an enum, a rule name and an integer. The rule names are part of the
+   * lockstep contract with the desktop enforcer's C# port
+   * (agent/tests/complexity-lockstep.test.mjs compares all three fields).
+   *
    * @param {string} text
-   * @returns {'simple'|'moderate'|'complex'} always one of these three; never throws.
+   * @returns {{ verdict: 'simple'|'moderate'|'complex', rule: string, score: number|null }}
    */
-  function classify(text) {
+  function decide(text) {
     if (typeof text !== 'string') text = '';
     const trimmed = text.trim();
 
     // 1. No typed text at all -> 'moderate', deliberately NOT 'simple'. The
     //    common shape here is an attachment with no question typed above it;
     //    silently routing that to the cheapest model is the worse failure.
-    if (!trimmed) return 'moderate';
+    if (!trimmed) return { verdict: 'moderate', rule: 'empty', score: null };
 
     // 2. Bound the scan (see boundWindow — latency guard, not a signal).
     const sample = boundWindow(trimmed);
 
     // 3. Trivial fast path, dominance-gated (see isAllTrivialTokens).
-    if (isAllTrivialTokens(sample)) return 'simple';
+    if (isAllTrivialTokens(sample)) return { verdict: 'simple', rule: 'greeting', score: null };
 
     // 3b. A bare sum is simple. Sits here, before scoring, because the lexicon
     //     has nothing to say about arithmetic and a score of 0 means 'moderate' —
     //     see isPureArithmetic for why this is a shape test, not a length test.
-    if (isPureArithmetic(sample)) return 'simple';
+    if (isPureArithmetic(sample)) return { verdict: 'simple', rule: 'arithmetic', score: null };
 
-    // 4. Weighted, per-category-capped score across all eleven categories.
+    // 3c. Nothing but small talk ("good morning", "how are you", "thanks so
+    //     much") is simple. Also a shape test — see isSmallTalk.
+    if (isSmallTalk(sample)) return { verdict: 'simple', rule: 'small_talk', score: null };
+
+    // 4. Weighted, per-category-capped score across every category.
     const { score, simplicityRequestHit, strongHit } = scoreAll(sample);
 
     // 5. Explicit-simplicity override: when the user has literally asked for a
@@ -611,12 +770,20 @@
     //    "explain cloud computing in simple words" (obey: simple) from
     //    "explain zero-trust architecture in simple terms" (a weight-4+ term is
     //    in there; asking nicely doesn't make the subject easy).
-    if (simplicityRequestHit && !strongHit) return 'simple';
+    if (simplicityRequestHit && !strongHit) return { verdict: 'simple', rule: 'simplicity_request', score };
 
     // 6. Score -> tier. Note there is no length term in this function at all.
-    if (score >= COMPLEX_AT) return 'complex';
-    if (score <= SIMPLE_AT) return 'simple';
-    return 'moderate';
+    if (score >= COMPLEX_AT) return { verdict: 'complex', rule: 'score', score };
+    if (score <= SIMPLE_AT) return { verdict: 'simple', rule: 'score', score };
+    return { verdict: 'moderate', rule: 'score', score };
+  }
+
+  /**
+   * @param {string} text
+   * @returns {'simple'|'moderate'|'complex'} always one of these three; never throws.
+   */
+  function classify(text) {
+    return decide(text).verdict;
   }
 
   export const __cfaiComplexity = {
@@ -629,6 +796,19 @@
         // A classifier fault must never break the send path, and must never
         // silently downgrade the user's model either.
         return 'moderate';
+      }
+    },
+    /**
+     * classifyDetailed(text) -> { verdict, rule, score }. Same verdict as
+     * classify(); `rule` names the deciding step and `score` is the integer
+     * score for the scored steps (null otherwise). For tests and diagnostics —
+     * carries no prompt text. Total function.
+     */
+    classifyDetailed(text) {
+      try {
+        return decide(text);
+      } catch {
+        return { verdict: 'moderate', rule: 'error', score: null };
       }
     },
   };

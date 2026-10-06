@@ -385,7 +385,9 @@ async function bakedModelRouterConfig() {
     const mod = await import(
       pathToFileURL(join(agentRoot, 'src', 'os_monitor', 'model-router-config.js')).href
     );
-    const cfg = mod.buildModelRouterConfig();
+    // The LEXICON only: the catalog and the routing policy are added at run time
+    // (a baked policy would be this build machine's cached rules, forever).
+    const cfg = (mod.buildLexiconConfig || mod.buildModelRouterConfig)();
     _bakedRouterOk = !!cfg;
     return cfg;
   } catch (err) {

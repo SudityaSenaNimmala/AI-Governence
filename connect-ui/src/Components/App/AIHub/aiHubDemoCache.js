@@ -77,7 +77,7 @@ export const WARM_PATHS = [
   "/claude-usage?sources=all&days=30",
   "/claude-usage?sources=all&days=7",
   "/claude-usage?sources=all&days=90",
-  "/routing/rules",
+  "/routing/rules?schema=2",
   "/routing/endpoints",
   "/routing/analytics",
   "/routing/log?limit=50",

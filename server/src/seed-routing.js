@@ -1,6 +1,6 @@
 // Seed the built-in model routing rules on server startup, so routing works the
 // moment the extension is installed instead of only after an admin authors rules
-// by hand.
+// by hand — and migrate stored rules to schema v2 (lib/routing-schema.js).
 //
 // IDENTITY IS `builtin_key`, NOT THE NAME. The previous version treated the rule
 // NAME as the identity, and that is what put six rules in the live database when
@@ -9,92 +9,90 @@
 // and inserted a second copy of each. At equal priority, which copy of a pair
 // won was arbitrary. A stable key cannot be edited by accident.
 //
-// INSERT-ONLY, on purpose. A built-in an admin has renamed, disabled or
-// repointed must survive a restart, so an existing builtin_key is left entirely
-// alone rather than reset to the shipped default. That makes "disable this rule"
-// a durable decision instead of one the next deploy quietly undoes.
+// INSERT-ONLY for anything an admin has touched. A built-in an admin has
+// renamed, reprioritised or repointed keeps its decisions across a restart;
+// only a built-in still byte-for-byte as we shipped it is rewritten to the
+// current default. A DISABLED pristine built-in is still rewritten, but stays
+// disabled — "disable this rule" is a durable decision.
+//
+// SCHEMA v2 MIGRATION (idempotent — a rule already at schema_version 2 is never
+// touched again):
+//   - pristine v1 built-in   → the shipped v2 rule (tier + effort, no hard-coded
+//                              model), id and enabled preserved.
+//   - admin-edited v1 rule   → translateV1Rule(): action.type set_tier with an
+//                              inferred target_tier, the admin's picker label kept
+//                              as action.ui_name AND recorded as a catalog override
+//                              when it differs from what we shipped; a
+//                              sensitivity-only rule is scoped to api_proxy. The
+//                              original is kept under migrated_from_v1.
 
 import crypto from 'node:crypto';
+import {
+  SCHEMA_VERSION, RULE_SURFACES, COMPLEXITY_TIER, COMPLEXITY_EFFORT,
+  translateV1Rule, catalogOverrideFor,
+} from './lib/routing-schema.js';
 
-// `action.ui_name` is the label the browser extension CLICKS in that platform's
-// own model picker. `action.model` is the API id for the fetch-blocker rewrite
-// path. They are separate because a model id is not a picker label — clicking
-// "claude-sonnet-4-20250514" finds nothing on claude.ai.
-//
-// Priorities ascend with tier so the cheapest match is considered first, and
+const PROVIDERS = [
+  ['anthropic', 'Anthropic'],
+  ['openai', 'OpenAI'],
+  ['google', 'Google'],
+  ['mistral', 'Mistral'],
+  ['perplexity', 'Perplexity'],
+];
+const COMPLEXITY_ROWS = [
+  // complexity, priority, phrase
+  ['simple',   20, 'Simple prompt'],
+  ['moderate', 30, 'Standard prompt'],
+  ['complex',  40, 'Demanding prompt'],
+];
+const TIER_LABEL = { economy: 'Economy', standard: 'Standard', premium: 'Premium' };
+
+// Routing goes BOTH ways by demand: simple → economy (low effort), moderate →
+// standard, demanding → premium (high effort). Priorities ascend with tier and
 // leave room (20/30/40) for admin rules to sit above or between them.
-export const DEFAULT_RULES = [
-  // ── Simple prompt → cheapest tier ──
-  { builtin_key: 'anthropic:simple',    priority: 20, provider: 'anthropic',
-    name: 'Simple prompt → Haiku (fastest & cheapest)',
-    action: { ui_name: 'Haiku',        model: 'claude-haiku-4-5' } },
-  { builtin_key: 'openai:simple',       priority: 20, provider: 'openai',
-    name: 'Simple prompt → GPT-4o mini',
-    action: { ui_name: 'GPT-4o mini',  model: 'gpt-4o-mini' } },
-  // `gemini-2.0-flash` was retired and is no longer in Google's price list, so the
-  // fetch-rewrite path was naming a model that no longer exists. `ui_name` stays
-  // 'Flash' — that is the label clicked in Gemini's own picker, and it is still
-  // what the picker shows.
-  { builtin_key: 'google:simple',       priority: 20, provider: 'google',
-    name: 'Simple prompt → Gemini Flash',
-    action: { ui_name: 'Flash',        model: 'gemini-2.5-flash-lite' } },
-  { builtin_key: 'mistral:simple',      priority: 20, provider: 'mistral',
-    name: 'Simple prompt → Mistral Small',
-    action: { ui_name: 'Small',        model: 'mistral-small-latest' } },
-  { builtin_key: 'perplexity:simple',   priority: 20, provider: 'perplexity',
-    name: 'Simple prompt → Sonar',
-    action: { ui_name: 'Sonar',        model: 'sonar' } },
+export const DEFAULT_RULES = PROVIDERS.flatMap(([provider, providerName]) =>
+  COMPLEXITY_ROWS.map(([complexity, priority, phrase]) => {
+    const tier = COMPLEXITY_TIER[complexity];
+    const effort = COMPLEXITY_EFFORT[complexity];
+    return {
+      builtin_key: `${provider}:${complexity}`,
+      name: `${providerName}: ${phrase} → ${TIER_LABEL[tier]}${effort ? ` (${effort} effort)` : ''}`,
+      enabled: true,
+      priority,
+      schema_version: SCHEMA_VERSION,
+      scope: { surfaces: [...RULE_SURFACES] },
+      conditions: { provider: [provider], complexity: [complexity] },
+      action: { type: 'set_tier', target_tier: tier, ...(effort ? { effort } : {}) },
+      mode: 'enforce',
+    };
+  }));
 
-  // ── Moderate prompt → balanced tier ──
-  { builtin_key: 'anthropic:moderate',  priority: 30, provider: 'anthropic',
-    name: 'Standard prompt → Sonnet (balanced)',
-    action: { ui_name: 'Sonnet',       model: 'claude-sonnet-5' } },
-  { builtin_key: 'openai:moderate',     priority: 30, provider: 'openai',
-    name: 'Standard prompt → GPT-4o',
-    action: { ui_name: 'GPT-4o',       model: 'gpt-4o' } },
-  // `gemini-2.5-flash-thinking` is not a model id Google publishes — thinking is a
-  // mode on the Flash models, not a separate model. The rewrite path was sending
-  // an id the API would reject.
-  { builtin_key: 'google:moderate',     priority: 30, provider: 'google',
-    name: 'Standard prompt → Gemini Thinking',
-    action: { ui_name: 'Thinking',     model: 'gemini-3.7-flash' } },
-  { builtin_key: 'mistral:moderate',    priority: 30, provider: 'mistral',
-    name: 'Standard prompt → Mistral Medium',
-    action: { ui_name: 'Medium',       model: 'mistral-medium-latest' } },
-  { builtin_key: 'perplexity:moderate', priority: 30, provider: 'perplexity',
-    name: 'Standard prompt → Sonar Pro',
-    action: { ui_name: 'Sonar Pro',    model: 'sonar-pro' } },
-
-  // ── Complex prompt → flagship tier ──
-  { builtin_key: 'anthropic:complex',   priority: 40, provider: 'anthropic',
-    name: 'Complex prompt → Opus (premium)',
-    action: { ui_name: 'Opus',         model: 'claude-opus-5' } },
-  { builtin_key: 'openai:complex',      priority: 40, provider: 'openai',
-    name: 'Complex prompt → GPT-4 (premium)',
-    action: { ui_name: 'GPT-4',        model: 'gpt-4' } },
-  { builtin_key: 'google:complex',      priority: 40, provider: 'google',
-    name: 'Complex prompt → Gemini Pro',
-    action: { ui_name: 'Pro',          model: 'gemini-2.5-pro' } },
-  { builtin_key: 'mistral:complex',     priority: 40, provider: 'mistral',
-    name: 'Complex prompt → Mistral Large',
-    action: { ui_name: 'Large',        model: 'mistral-large-latest' } },
-  { builtin_key: 'perplexity:complex',  priority: 40, provider: 'perplexity',
-    name: 'Complex prompt → Research',
-    action: { ui_name: 'Research',     model: 'sonar-deep-research' } },
-].map((r) => ({
-  ...r,
-  enabled: true,
-  conditions: {
-    provider: [r.provider],
-    complexity: [r.builtin_key.split(':')[1]],
-  },
-}));
+// Every v1 built-in we have ever shipped, exactly: name, priority, picker label,
+// and each model id it has carried. A stored v1 built-in matching one of these
+// has never been edited and is safe to rewrite onto the v2 default.
+const SHIPPED_V1 = {
+  'anthropic:simple':    { name: 'Simple prompt → Haiku (fastest & cheapest)', priority: 20, ui_name: 'Haiku', models: ['claude-haiku-4-5', 'claude-haiku-4-5-20251001'] },
+  'openai:simple':       { name: 'Simple prompt → GPT-4o mini', priority: 20, ui_name: 'GPT-4o mini', models: ['gpt-4o-mini'] },
+  'google:simple':       { name: 'Simple prompt → Gemini Flash', priority: 20, ui_name: 'Flash', models: ['gemini-2.5-flash-lite', 'gemini-2.0-flash'] },
+  'mistral:simple':      { name: 'Simple prompt → Mistral Small', priority: 20, ui_name: 'Small', models: ['mistral-small-latest'] },
+  'perplexity:simple':   { name: 'Simple prompt → Sonar', priority: 20, ui_name: 'Sonar', models: ['sonar'] },
+  'anthropic:moderate':  { name: 'Standard prompt → Sonnet (balanced)', priority: 30, ui_name: 'Sonnet', models: ['claude-sonnet-5', 'claude-sonnet-4-20250514'] },
+  'openai:moderate':     { name: 'Standard prompt → GPT-4o', priority: 30, ui_name: 'GPT-4o', models: ['gpt-4o'] },
+  'google:moderate':     { name: 'Standard prompt → Gemini Thinking', priority: 30, ui_name: 'Thinking', models: ['gemini-3.7-flash', 'gemini-2.5-flash-thinking'] },
+  'mistral:moderate':    { name: 'Standard prompt → Mistral Medium', priority: 30, ui_name: 'Medium', models: ['mistral-medium-latest'] },
+  'perplexity:moderate': { name: 'Standard prompt → Sonar Pro', priority: 30, ui_name: 'Sonar Pro', models: ['sonar-pro'] },
+  'anthropic:complex':   { name: 'Complex prompt → Opus (premium)', priority: 40, ui_name: 'Opus', models: ['claude-opus-5', 'claude-opus-4-20250514'] },
+  'openai:complex':      { name: 'Complex prompt → GPT-4 (premium)', priority: 40, ui_name: 'GPT-4', models: ['gpt-4'] },
+  'google:complex':      { name: 'Complex prompt → Gemini Pro', priority: 40, ui_name: 'Pro', models: ['gemini-2.5-pro'] },
+  'mistral:complex':     { name: 'Complex prompt → Mistral Large', priority: 40, ui_name: 'Large', models: ['mistral-large-latest'] },
+  'perplexity:complex':  { name: 'Complex prompt → Research', priority: 40, ui_name: 'Research', models: ['sonar-deep-research'] },
+};
 
 // The rules the OLD name-keyed seeder shipped. They are superseded by the
 // per-tier set above, and they carry no ui_name, so they are retired — but ONLY
 // while still pristine: an admin who has touched one owns it, and it is left
-// where it is. Matched on the mojibake and the fixed spelling, since both
-// spellings exist in live data.
+// where it is (and translated to v2 like any other admin rule). Matched on the
+// mojibake and the fixed spelling, since both spellings exist in live data.
 const RETIRED_NAMES = [
   'Auto-optimize: Anthropic non-complex → Sonnet',
   'Auto-optimize: OpenAI non-complex → GPT-4o-mini',
@@ -109,114 +107,112 @@ const RETIRED_SHAPE = {
   models: ['claude-sonnet-4-20250514', 'gpt-4o-mini', 'gemini-2.0-flash'],
 };
 
-// Model ids we have shipped for a built-in in the past, per builtin_key. A
-// stored rule still carrying one of these — AND still carrying the name and
-// priority we shipped with it — has never been edited by an admin, so it is
-// safe to move it onto the current default model.
-//
-// This exists because seeding is insert-only. That rule is right: an admin who
-// repoints a built-in must not have it reset on every deploy. But it also means
-// a stale model id lives forever in every existing install, and "Complex prompt
-// → Opus (premium)" was still pointing at claude-opus-4-20250514 long after
-// that stopped being the flagship. Customers were paying premium-tier routing
-// for a superseded model.
-//
-// The check is deliberately narrow: same builtin_key, same shipped name, same
-// priority, and a model id from this list. Anything else is treated as the
-// admin's own decision and left exactly where it is.
-const SUPERSEDED_MODELS = {
-  'anthropic:simple':   ['claude-haiku-4-5-20251001'],
-  'anthropic:moderate': ['claude-sonnet-4-20250514'],
-  'anthropic:complex':  ['claude-opus-4-20250514'],
-  // Google shipped two ids that stopped working rather than merely aging:
-  // gemini-2.0-flash was retired, and gemini-2.5-flash-thinking never existed
-  // (thinking is a mode on Flash, not a model). Existing installs are still
-  // sending both, so these need the same pristine-only refresh.
-  'google:simple':      ['gemini-2.0-flash'],
-  'google:moderate':    ['gemini-2.5-flash-thinking'],
+const sameList = (a, b) => {
+  const x = Array.isArray(a) ? [...a].map(String).sort() : [];
+  const y = Array.isArray(b) ? [...b].map(String).sort() : [];
+  return x.join(',') === y.join(',');
 };
-
-/**
- * Move pristine built-ins off superseded model ids. Returns the number updated.
- * Never touches a rule whose name, priority, or model an admin has changed.
- */
-async function refreshSupersededModels(col, all) {
-  const byKey = new Map(DEFAULT_RULES.map((r) => [r.builtin_key, r]));
-  let updated = 0;
-
-  for (const rule of all) {
-    const stale = SUPERSEDED_MODELS[rule.builtin_key];
-    if (!stale) continue;
-
-    const shipped = byKey.get(rule.builtin_key);
-    if (!shipped) continue;
-
-    const current = rule.action?.model;
-    if (!stale.includes(current)) continue;              // admin repointed it, or already current
-    if (rule.name !== shipped.name) continue;            // admin renamed it
-    if (rule.priority !== shipped.priority) continue;    // admin reprioritised it
-
-    // The whole `action` object, not a dotted 'action.model' path. Two reasons:
-    // the pristine check above already established this rule still carries the
-    // action we shipped, so replacing it wholesale is exactly equivalent; and
-    // the test double for Mongo does not implement dotted-path $set — it writes
-    // a literal "action.model" key instead, which would make this look like it
-    // worked in tests while only really working in production.
-    await col.updateOne(
-      { id: rule.id },
-      { $set: { action: { ...shipped.action }, updated_at: new Date() } },
-    );
-    updated++;
-    console.log(`[seed] routing rule "${rule.name}": ${current} → ${shipped.action.model}`);
-  }
-  return updated;
-}
 
 /** True only for an untouched legacy seeded rule — never for admin-edited data. */
 function isPristineLegacy(rule) {
   if (rule.builtin_key) return false;
+  if (rule.schema_version === SCHEMA_VERSION) return false;
   if (!RETIRED_NAMES.includes(rule.name)) return false;
   if (rule.priority !== RETIRED_SHAPE.priority) return false;
   if (rule.enabled !== true) return false;
-  const c = rule.conditions || {};
-  const complexity = Array.isArray(c.complexity) ? [...c.complexity].sort() : [];
-  if (complexity.join(',') !== [...RETIRED_SHAPE.complexity].sort().join(',')) return false;
+  if (!sameList(rule.conditions?.complexity, RETIRED_SHAPE.complexity)) return false;
   const a = rule.action || {};
   if (a.ui_name) return false;
   return RETIRED_SHAPE.models.includes(a.model);
+}
+
+/** True for a v1 built-in still exactly as we shipped it (enabled state aside). */
+export function isPristineV1Builtin(rule) {
+  if (rule.schema_version === SCHEMA_VERSION) return false;
+  const shipped = SHIPPED_V1[rule.builtin_key];
+  if (!shipped) return false;
+  if (rule.name !== shipped.name || rule.priority !== shipped.priority) return false;
+  const [provider, complexity] = rule.builtin_key.split(':');
+  const c = rule.conditions || {};
+  if (Object.keys(c).some((k) => !['provider', 'complexity'].includes(k))) return false;
+  if (!sameList(c.provider, [provider]) || !sameList(c.complexity, [complexity])) return false;
+  const a = rule.action || {};
+  if (Object.keys(a).some((k) => !['ui_name', 'model'].includes(k))) return false;
+  return a.ui_name === shipped.ui_name && shipped.models.includes(a.model);
+}
+
+const shippedFields = (r) => ({
+  name: r.name,
+  priority: r.priority,
+  schema_version: r.schema_version,
+  scope: structuredClone(r.scope),
+  conditions: structuredClone(r.conditions),
+  action: { ...r.action },
+  mode: r.mode,
+});
+
+async function upsertOverrideIfAbsent(db, ov) {
+  const col = db.collection('routing_catalog_overrides');
+  const existing = await col.findOne({ provider: ov.provider, host_or_app: ov.host_or_app, tier: ov.tier });
+  if (existing) return false;
+  await col.insertOne({ id: crypto.randomUUID(), ...ov, source: 'v1_migration', created_at: new Date(), updated_at: new Date() });
+  return true;
 }
 
 export async function seedDefaultRoutingRules(db) {
   const col = db.collection('routing_rules');
   const all = await col.find({}).project({ _id: 0 }).toArray();
 
-  // Retire pristine legacy defaults so the tab does not show two generations of
-  // built-ins describing the same routing.
+  // 1. Retire pristine legacy defaults so the tab does not show two generations
+  //    of built-ins describing the same routing.
   const stale = all.filter(isPristineLegacy);
   for (const rule of stale) {
     await col.deleteOne({ id: rule.id });
     console.log(`[seed] retired superseded routing rule: ${rule.name}`);
   }
+  const live = all.filter((r) => !stale.includes(r));
 
-  // Move untouched built-ins off superseded model ids (see SUPERSEDED_MODELS).
-  const refreshed = await refreshSupersededModels(col, all.filter((r) => !stale.includes(r)));
+  // 2. Migrate everything still on v1.
+  const byKey = new Map(DEFAULT_RULES.map((r) => [r.builtin_key, r]));
+  let migrated = 0;
+  let translated = 0;
+  let overrides = 0;
+  for (const rule of live) {
+    if (rule.schema_version === SCHEMA_VERSION) continue;
+    if (isPristineV1Builtin(rule) && byKey.has(rule.builtin_key)) {
+      // Whole-field $set, not dotted paths: the shipped fields replace the old
+      // ones outright (the action loses its hard-coded ui_name/model), and the
+      // Mongo test double does not implement dotted-path $set.
+      await col.updateOne(
+        { id: rule.id },
+        { $set: { ...shippedFields(byKey.get(rule.builtin_key)), updated_at: new Date() } },
+      );
+      migrated++;
+      continue;
+    }
+    const v2 = translateV1Rule(rule);
+    const { _id, ...fields } = v2;
+    await col.updateOne({ id: rule.id }, { $set: { ...fields, updated_at: new Date() } });
+    translated++;
+    const ov = catalogOverrideFor(v2);
+    if (ov && await upsertOverrideIfAbsent(db, ov)) overrides++;
+    console.log(`[seed] routing rule "${rule.name}" translated to schema v2`);
+  }
 
-  const have = new Set(all.map((r) => r.builtin_key).filter(Boolean));
+  // 3. Insert any built-in this database has never had.
+  const have = new Set(live.map((r) => r.builtin_key).filter(Boolean));
   const missing = DEFAULT_RULES.filter((r) => !have.has(r.builtin_key));
-  if (missing.length === 0) return { inserted: 0, retired: stale.length, refreshed };
-
-  const now = new Date();
-  await col.insertMany(missing.map((r) => ({
-    id: crypto.randomUUID(),
-    builtin_key: r.builtin_key,
-    name: r.name,
-    enabled: r.enabled,
-    priority: r.priority,
-    conditions: r.conditions,
-    action: r.action,
-    created_at: now,
-    updated_at: now,
-  })));
-  console.log(`[seed] routing rules inserted: ${missing.length}`);
-  return { inserted: missing.length, retired: stale.length, refreshed };
+  if (missing.length) {
+    const now = new Date();
+    await col.insertMany(missing.map((r) => ({
+      id: crypto.randomUUID(),
+      builtin_key: r.builtin_key,
+      enabled: r.enabled,
+      ...shippedFields(r),
+      created_at: now,
+      updated_at: now,
+    })));
+    console.log(`[seed] routing rules inserted: ${missing.length}`);
+  }
+  return { inserted: missing.length, retired: stale.length, migrated, translated, overrides };
 }

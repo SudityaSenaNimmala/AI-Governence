@@ -6,9 +6,14 @@
 //
 // The browser extension fetches http://localhost:19532/cfai/identity on startup.
 // If it responds → auto-link. If it doesn't → agent not running, extension is standalone.
+//
+// It also accepts POST /cfai/routing-heartbeat from the extension ("I route model
+// selection in this browser"); see os_monitor/routing-ownership.js. Loopback and
+// extension origins only, size- and shape-checked, nothing echoed back.
 
 import http from 'node:http';
 import os from 'node:os';
+import { handleRoutingHeartbeat } from './os_monitor/routing-ownership.js';
 
 // Try these ports in order. If one is occupied, try the next.
 // The extension checks all of them to find the beacon.
@@ -21,7 +26,7 @@ const HOST = '127.0.0.1';
 // this value, and an extension attributing usage to a different string than the
 // agent on the same machine is the exact duplicate-row bug this plumbing exists
 // to prevent. Falls back to the OS username so an older caller still works.
-export function startIdentityBeacon({ machineId, user, identitySource, log }) {
+export function startIdentityBeacon({ machineId, user, identitySource, log, routingOwnersPath, onRoutingHeartbeat, ports = BEACON_PORTS }) {
   const hostname = os.hostname();
   const osUser = os.userInfo().username;
   const identity = user || osUser;
@@ -41,9 +46,12 @@ export function startIdentityBeacon({ machineId, user, identitySource, log }) {
     ports: BEACON_PORTS,
   });
 
+  // Replay guard for routing heartbeats: nonce -> first-seen ms (bounded).
+  const seenNonces = new Map();
+
   const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
@@ -51,6 +59,14 @@ export function startIdentityBeacon({ machineId, user, identitySource, log }) {
     if (req.url === '/cfai/identity' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(payload);
+    }
+
+    if (req.url === '/cfai/routing-heartbeat' && req.method === 'POST') {
+      return handleRoutingHeartbeat(req, res, {
+        ...(routingOwnersPath ? { path: routingOwnersPath } : {}),
+        seenNonces,
+        onBeat: onRoutingHeartbeat || null,
+      });
     }
 
     res.writeHead(404);
@@ -76,11 +92,11 @@ export function startIdentityBeacon({ machineId, user, identitySource, log }) {
   });
 
   function tryListen() {
-    if (portIndex >= BEACON_PORTS.length) {
-      log?.warn?.('identity-beacon: all ports occupied (' + BEACON_PORTS.join(', ') + ')');
+    if (portIndex >= ports.length) {
+      log?.warn?.('identity-beacon: all ports occupied (' + ports.join(', ') + ')');
       return;
     }
-    const port = BEACON_PORTS[portIndex];
+    const port = ports[portIndex];
     server.once('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         // A BUSY 19532 IS USUALLY A STALE BEACON, NOT A CONFLICT. The extension's

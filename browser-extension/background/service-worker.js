@@ -50,7 +50,8 @@ const STORAGE = {
   RECORDING_DAILY: 'cfai.recordingDaily',
   // GONE WITH THE VIDEO PIPELINE: 'cfai.recordings' (tabId → live video capture).
   // Nothing reads it any more.
-  ROUTING_RULES: 'cfai.routing_rules',     // model routing rules from server
+  ROUTING_POLICY: 'cfai.routing_policy',   // { policy, etag, at, source } — GET /api/v1/routing/policy (v2)
+  ROUTING_RULES: 'cfai.routing_rules',     // legacy v1 rules (GET /routing/rules), used only when v2 is absent
   ROUTING_RULES_AT: 'cfai.routing_rules_at',
   AI_SURFACES:  'cfai.ai_surfaces',   // mirror of GET /api/v1/ai-surfaces
   DLP_POLICY:   'cfai.dlp_policy',    // mirror of GET /api/policy-packs/extension-config
@@ -85,7 +86,12 @@ const BLOCKED_ALARM = 'cfai-blocked-refresh';
 const BLOCKED_REFRESH_MIN = 2;     // poll blocked agents every 2 min
 
 const ROUTING_ALARM = 'cfai-routing-refresh';
-const ROUTING_REFRESH_MIN = 1;     // poll routing rules every 1 min
+const ROUTING_REFRESH_MIN = 1;     // poll the routing policy every 1 min (ETag: unchanged = 304)
+// Declared up here, not beside sendRoutingHeartbeat(): the alarm is created at
+// top level further up the file than that function, and a const read before its
+// declaration is a TDZ ReferenceError that would stop the whole worker loading.
+const ROUTING_HEARTBEAT_ALARM = 'cfai-routing-heartbeat';
+const ROUTING_HEARTBEAT_MIN = 0.5;   // 30 s — the chrome.alarms floor since Chrome 120
 const DLP_POLICY_ALARM = 'cfai-dlp-policy-refresh';
 const DLP_POLICY_REFRESH_MIN = 5;  // pattern policy changes rarely; 5 min is ample
 
@@ -735,6 +741,7 @@ async function injectDlpStack(tabId) {
       'vendor/rrweb-record.js',
       'content/patterns.js',
       'content/complexity.js',
+      'content/model-routing.js',
       'content/replay.js',
       'content/content.js',
     ],
@@ -876,6 +883,7 @@ chrome.alarms.create(BLOCKED_ALARM, { periodInMinutes: BLOCKED_REFRESH_MIN });
 // re-checks expiry through nextEngagement() instead of trusting the sweep.
 chrome.alarms.create(ENGAGEMENT_SWEEP_ALARM, { periodInMinutes: 1 });
 chrome.alarms.create(ROUTING_ALARM, { periodInMinutes: ROUTING_REFRESH_MIN });
+chrome.alarms.create(ROUTING_HEARTBEAT_ALARM, { periodInMinutes: ROUTING_HEARTBEAT_MIN });
 chrome.alarms.create(DLP_POLICY_ALARM, { periodInMinutes: DLP_POLICY_REFRESH_MIN });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === FLUSH_ALARM)      { syncIdentity().catch(() => {}); flushQueue(); }
@@ -883,6 +891,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === BLOCKED_ALARM)    refreshBlockedAgents();
   if (alarm.name === ENGAGEMENT_SWEEP_ALARM) engagementSweep().catch(() => {});
   if (alarm.name === ROUTING_ALARM)    { refreshRoutingRules(); refreshAiSurfaces(); }
+  if (alarm.name === ROUTING_HEARTBEAT_ALARM) sendRoutingHeartbeat();
   if (alarm.name === DLP_POLICY_ALARM) refreshDlpPolicy();
 });
 
@@ -1141,22 +1150,140 @@ async function refreshPlatforms() {
   }
 }
 
-// --- routing rules sync ---
-// Pull model routing rules so the content script can auto-switch models before send.
+// --- routing policy sync ---
+// The content script decides routes with the shared decideRoute
+// (content/model-routing.js); this keeps its policy input current.
+//
+//   1. GET /api/v1/routing/policy — the v2 document { version, rules,
+//      catalog_overrides, settings, fleet_enabled }, MACHINE-AUTHENTICATED
+//      (authedFetch) and conditional on the last ETag, so an unchanged policy
+//      costs a 304 and no storage write.
+//   2. A 404 means a server that predates routing v2: fall back to the legacy
+//      unauthenticated GET /api/v1/routing/rules array, which decideRoute also
+//      understands, and drop any stale v2 mirror so the legacy one is used.
+//   3. Any other failure leaves the previous mirror in place. An empty write
+//      would look like a successful sync; decideRoute with no policy still runs
+//      its built-in table, so a transient outage never turns routing off and a
+//      truncated response never turns an admin's rules off.
 async function refreshRoutingRules() {
   try {
     const config = await getConfig();
     if (!config.serverUrl) return;
-    const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/routing/rules`);
-    if (!res.ok) return;
-    const rules = await res.json();
-    const active = (rules || []).filter(r => r.enabled).sort((a,b) => (a.priority||50) - (b.priority||50));
-    await setStored(STORAGE.ROUTING_RULES,    active);
-    await setStored(STORAGE.ROUTING_RULES_AT, Date.now());
+    const cached = await getStored(STORAGE.ROUTING_POLICY);
+    let res = null;
+    try {
+      res = await authedFetch('/api/v1/routing/policy', {
+        headers: cached && cached.etag ? { 'if-none-match': cached.etag } : {},
+      });
+    } catch {
+      res = null;   // not enrolled yet / offline — the legacy feed is unauthenticated
+    }
+    if (res && res.status === 304 && cached) {
+      await setStored(STORAGE.ROUTING_POLICY, { ...cached, at: Date.now() });
+      return;
+    }
+    if (res && res.ok) {
+      const policy = await res.json();
+      if (!policy || typeof policy !== 'object' || Array.isArray(policy) || !Array.isArray(policy.rules)) return;
+      const etag = (res.headers && typeof res.headers.get === 'function' && res.headers.get('etag')) || null;
+      await setStored(STORAGE.ROUTING_POLICY, { policy, etag, at: Date.now(), source: 'v2' });
+      return;
+    }
+    if (res && res.status !== 404) return;   // server error: keep what we have
+    if (res && res.status === 404) await chrome.storage.local.remove([STORAGE.ROUTING_POLICY]);
+    await refreshLegacyRoutingRules(config);
   } catch (e) {
-    console.warn('[cfai] routing rules refresh failed:', e?.message || e);
+    console.warn('[cfai] routing policy refresh failed:', e?.message || e);
   }
 }
+
+// v1 feed, for servers without /routing/policy. Unchanged behaviour.
+async function refreshLegacyRoutingRules(config) {
+  const res = await fetch(`${config.serverUrl.replace(/\/$/, '')}/api/v1/routing/rules`);
+  if (!res.ok) return;
+  const rules = await res.json();
+  const active = (rules || []).filter(r => r.enabled).sort((a,b) => (a.priority||50) - (b.priority||50));
+  await setStored(STORAGE.ROUTING_RULES,    active);
+  await setStored(STORAGE.ROUTING_RULES_AT, Date.now());
+}
+
+// --- routing ownership heartbeat (desktop agent) ---
+//
+// When the desktop agent is installed, its enforcer can ALSO drive model pickers
+// in browser windows (UI Automation). Two engines routing the same composer would
+// fight, so the extension announces that it owns routing in THIS browser and the
+// desktop agent stands down for it while heartbeats keep arriving. The extension
+// always routes in its own browser regardless — the heartbeat informs the agent,
+// it is never a precondition here.
+//
+// CONTRACT (implemented on the agent side):
+//   POST http://127.0.0.1:<beacon port>/cfai/routing-heartbeat
+//   content-type: application/json
+//   { browser: 'chrome'|'edge'|'other', ext_version, routing_owner: true,
+//     nonce, instance_id, ts }
+//   <beacon port> is whichever of BEACON_PORTS answered GET /cfai/identity.
+//   Sent every 30 s. The agent should treat that browser as extension-owned
+//   until ~90 s (three missed beats) after the last beat. nonce is fresh per
+//   beat; instance_id is stable per browser profile. The response is ignored.
+// Loopback only: no identity, no content.
+// (ROUTING_HEARTBEAT_ALARM / ROUTING_HEARTBEAT_MIN are declared with the other alarms at the top.)
+const ROUTING_INSTANCE_KEY = 'cfai.routing_instance_id';
+let _beaconPort = null;
+
+function browserKind() {
+  const ua = String((typeof navigator !== 'undefined' && navigator.userAgent) || '');
+  // Edge FIRST: its user agent contains "Chrome/" too.
+  return /\bEdg\//.test(ua) ? 'edge' : (/\bChrome\//.test(ua) ? 'chrome' : 'other');
+}
+
+function randomHex(bytes) {
+  const a = new Uint8Array(bytes);
+  crypto.getRandomValues(a);
+  return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function findBeaconPort() {
+  const tryPort = async (port) => {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/cfai/identity`, { signal: AbortSignal.timeout(1000) });
+      return !!(res && res.ok);
+    } catch { return false; }
+  };
+  if (_beaconPort && await tryPort(_beaconPort)) return _beaconPort;
+  _beaconPort = null;
+  for (const port of BEACON_PORTS) {
+    if (await tryPort(port)) { _beaconPort = port; return port; }
+  }
+  return null;
+}
+
+/** One heartbeat. Resolves to the body sent, or null when there is no agent. */
+export async function sendRoutingHeartbeat() {
+  try {
+    const port = await findBeaconPort();
+    if (!port) return null;   // no desktop agent on this machine — nothing to tell
+    let instanceId = await getStored(ROUTING_INSTANCE_KEY);
+    if (!instanceId) { instanceId = randomHex(16); await setStored(ROUTING_INSTANCE_KEY, instanceId); }
+    const body = {
+      browser: browserKind(),
+      ext_version: chrome.runtime?.getManifest?.()?.version || null,
+      routing_owner: true,
+      nonce: randomHex(16),
+      instance_id: instanceId,
+      ts: new Date().toISOString(),
+    };
+    await fetch(`http://127.0.0.1:${port}/cfai/routing-heartbeat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(1000),
+    });
+    return body;
+  } catch {
+    return null;   // agent too old to know the endpoint, or gone — harmless
+  }
+}
+
 
 // Pull the DLP pattern policy derived from deployed compliance policy packs and
 // mirror it into chrome.storage.local, where content scripts pick it up. This is

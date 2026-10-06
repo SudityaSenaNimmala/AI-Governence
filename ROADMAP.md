@@ -373,6 +373,9 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
 - [ ] **Split DLP report batches on HTTP 413 so oversized file captures don't stall reporting**
   reporter.js re-queues the whole batch at the head on any non-OK response; two 25 MB captures in one POST 413 forever.
 
+- [ ] **Live-verify model routing on ChatGPT web/desktop and Perplexity, then switch them on**
+  Catalog entries are verified:false (ChatGPT labels unmeasured; some accounts have no picker); needs a live picker probe per surface before enforcing.
+
 ---
 
 ## P2 — enterprise distribution
@@ -550,6 +553,9 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
 
 - [ ] **Scan OneDrive/SharePoint files picked inside Copilot via Microsoft Graph**
   In-app cloud picks are reported as cloud_reference and allowed; a Graph lookup on the chip's SPO id needs tenant app consent.
+
+- [ ] **Set effort level automatically on claude.ai and Claude Desktop (live-verified setter)**
+  Routing reads and reports effort today but never sets it; effort-only decisions are recorded as noop (effort_unverified).
 
 ---
 
