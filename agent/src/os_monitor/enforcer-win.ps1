@@ -5190,6 +5190,33 @@ public static class CfaiEnforcer
     // which decideRoute never routes on — the same rule the desktop injector
     // and the proxy apply when their classifier is unavailable.
     static volatile bool _mrLexiconLoaded = false;
+
+    // ── Classifier time limits ──────────────────────────────────────────────
+    // NOT REGEX_TIMEOUT. That 25 ms limit guards the DLP rule scan. Here it was
+    // a live fault: one lexicon alternation scan over a ~4 KB window takes
+    // 1-6 ms on an idle machine (a whole classify ~35 ms), and .NET's match
+    // timeout is WALL-CLOCK per scan, so under CPU load (a busy PC, the agent
+    // suite running in parallel) a scan crossed 25 ms. RegexMatchTimeoutException
+    // reached the catch-all, the prompt became 'moderate'/'error', and desktop
+    // disagreed with the browser on the same text (corpus long-086/087/088).
+    //
+    // Every classifier pattern is lexicon-derived and linear on the bounded
+    // window (escaped literals, \b, \s+, \w*, plus the anchored structural
+    // signals), so the per-scan limit is only a net for a pathological future
+    // pattern — set ~100x above the worst idle scan. The per-classify budget
+    // caps the sum. Crossing either is NOT a verdict: 'unknown' (rule
+    // 'timeout'), which decideRoute's built-in table never routes, reported by
+    // rule name only. Must be declared above the static Regex fields below
+    // that use it (C# static initializers run in textual order).
+    static readonly TimeSpan MR_REGEX_TIMEOUT = TimeSpan.FromMilliseconds(500);
+    // Not readonly: the lockstep harness sets it to 0 to drive the timeout path.
+    static long _mrClassifyBudgetTicks = TimeSpan.FromMilliseconds(1500).Ticks;
+    class MrClassifyTimeout : Exception { }
+    static void MrCheckBudget(Stopwatch sw)
+    {
+        if (sw.Elapsed.Ticks >= _mrClassifyBudgetTicks) throw new MrClassifyTimeout();
+    }
+
     // Step 3b (pure arithmetic) and 3c (small talk) of complexity.js 1.4.0.
     // Null when an older config carried no such block: the step is skipped.
     static Regex _mrArithWrapper, _mrArithResidue, _mrArithHasOp, _mrArithDigit;
@@ -5203,7 +5230,7 @@ public static class CfaiEnforcer
     // was a .NET \d, NEL (U+0085) was a .NET \s, U+FEFF was not.
     //
     // THE SHADOW. Rather than rewriting \b into lookarounds (correct, but slow
-    // enough on a 4 KB window to trip the 25 ms REGEX_TIMEOUT under load), every
+    // enough on a 4 KB window to matter for the poll-thread budget), every
     // pattern runs against MrShadow(sample): a SAME-LENGTH copy in which every
     // non-ASCII letter / mark / number / connector (and ZWJ, ZWNJ, NEL) is the
     // inert U+0001 and U+FEFF is a space. On the shadow .NET's native \b \w \d
@@ -5223,7 +5250,7 @@ public static class CfaiEnforcer
         (char)0x2000, (char)0x2001, (char)0x2002, (char)0x2003, (char)0x2004, (char)0x2005, (char)0x2006,
         (char)0x2007, (char)0x2008, (char)0x2009, (char)0x200A,
         (char)0x2028, (char)0x2029, (char)0x202F, (char)0x205F, (char)0x3000, (char)0xFEFF };
-    static readonly Regex _mrJsWsRun = new Regex("[" + JS_WS + "]+", RegexOptions.None, REGEX_TIMEOUT);
+    static readonly Regex _mrJsWsRun = new Regex("[" + JS_WS + "]+", RegexOptions.None, MR_REGEX_TIMEOUT);
     const char MR_SHADOW_CHAR = (char)1;
 
     static string MrShadow(string s)
@@ -5302,7 +5329,7 @@ public static class CfaiEnforcer
         if (flags.IndexOf('i') >= 0) opts |= RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
         if (multiline) opts |= RegexOptions.Multiline;
         string netSource = MrJsRegexToNet(source, multiline);
-        return new Regex(netSource, opts, REGEX_TIMEOUT);
+        return new Regex(netSource, opts, MR_REGEX_TIMEOUT);
     }
 
     // JS String.prototype.trim / split(/\s+/) over the JS whitespace set.
@@ -5348,7 +5375,7 @@ public static class CfaiEnforcer
     // does in the browser extension.
     static string MrPhraseSource(string term)
     {
-        return Regex.Replace(MrEscapeRegex(term), " +", "\\s+", RegexOptions.None, REGEX_TIMEOUT);
+        return Regex.Replace(MrEscapeRegex(term), " +", "\\s+", RegexOptions.None, MR_REGEX_TIMEOUT);
     }
 
     static List<object> MrListOf(object arrList)
@@ -6684,6 +6711,9 @@ public static class CfaiEnforcer
             if (term == null || weight == 0 || hits.ContainsKey(term)) continue;
             hits[term] = weight; order.Add(term);
         }
+        // Structural signals arrive as {source, flags} data. complexity.js 1.5.0's
+        // PRODUCT_BUILD ("create a replica of whatsapp" -> complex) is seven of
+        // these, incl. one case-SENSITIVE pattern (flags "") — no code change here.
         foreach (var sig in cat.Structural)
         {
             if (!hits.ContainsKey(sig.Key) && sig.Rx.IsMatch(sample)) { hits[sig.Key] = sig.Weight; order.Add(sig.Key); }
@@ -6702,7 +6732,7 @@ public static class CfaiEnforcer
         return new CategoryScore { Sum = sum, Strong = strong, Hit = hits.Count > 0 };
     }
 
-    static readonly Regex _mrNonWordChars = new Regex("[^a-z0-9']+", RegexOptions.None, REGEX_TIMEOUT);
+    static readonly Regex _mrNonWordChars = new Regex("[^a-z0-9']+", RegexOptions.None, MR_REGEX_TIMEOUT);
 
     // JS String.prototype.toLowerCase, for the only purpose it serves here:
     // which [a-z0-9'] characters survive. The two non-ASCII code points whose
@@ -6793,10 +6823,15 @@ public static class CfaiEnforcer
     //   4  score; 5 simplicity request (no strong hit) -> simple; 6 thresholds.
     // A classifier fault must never break anything on the caller's side, and
     // must never silently downgrade a prompt either — 'moderate' on any
-    // failure, same as JS's catch.
+    // failure, same as JS's catch. A TIMEOUT is not a fault in the prompt:
+    // it is the machine being slow, and JS (no timeout) would have produced a
+    // real verdict, so any guess here would make desktop and browser disagree.
+    // It is 'unknown' / 'timeout' — never routed — and reported by rule name
+    // (never the text). See MR_REGEX_TIMEOUT.
     static MrVerdict ClassifyComplexityDetailed(string text)
     {
         if (!_mrLexiconLoaded) return MrV("unknown", "no_lexicon");
+        var sw = Stopwatch.StartNew();
         try
         {
             if (text == null) text = "";
@@ -6804,17 +6839,21 @@ public static class CfaiEnforcer
             if (trimmed.Length == 0) return MrV("moderate", "empty");
             string sample = MrBoundWindow(trimmed);
             if (MrIsAllTrivialTokens(sample)) return MrV("simple", "greeting");
+            MrCheckBudget(sw);
             string shadow = MrShadow(sample);
             if (MrIsPureArithmetic(shadow)) return MrV("simple", "arithmetic");
+            MrCheckBudget(sw);
             if (MrIsSmallTalk(sample)) return MrV("simple", "small_talk");
 
             int positive = 0; bool strongHit = false;
             foreach (var cat in _mrPositive)
             {
+                MrCheckBudget(sw);
                 var r = ScoreLexCategory(cat, shadow);
                 positive += r.Sum;
                 if (r.Strong) strongHit = true;
             }
+            MrCheckBudget(sw);
             var simpleTask = ScoreLexCategory(_mrSimpleTask, shadow);
             var simplicity = ScoreLexCategory(_mrSimplicityRequest, shadow);
             var trivial = ScoreLexCategory(_mrTrivialIntent, shadow);
@@ -6826,6 +6865,8 @@ public static class CfaiEnforcer
             if (score <= _mrSimpleAt) return MrV("simple", "score", score);
             return MrV("moderate", "score", score);
         }
+        catch (RegexMatchTimeoutException) { NoteRegexTimeout("model_router_complexity"); return MrV("unknown", "timeout"); }
+        catch (MrClassifyTimeout) { NoteRegexTimeout("model_router_complexity_budget"); return MrV("unknown", "timeout"); }
         catch { return MrV("moderate", "error"); }
     }
 

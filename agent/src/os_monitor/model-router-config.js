@@ -67,7 +67,8 @@ const CONTENT_JS_PATH = join(REPO_ROOT, 'browser-extension', 'content', 'content
 // matches complexity.js's own POSITIVE array (source-of-truth comment there).
 const POSITIVE_CATEGORY_NAMES = [
   'REASONING_DEPTH', 'TASK_COMPLEXITY', 'DOMAIN_EXPERTISE', 'PLANNING',
-  'CODING', 'DEBUGGING', 'ANALYSIS', 'OUTPUT_COMPLEXITY', 'RESEARCH_DEPTH', 'SHALLOW_TASK',
+  'CODING', 'DEBUGGING', 'ANALYSIS', 'OUTPUT_COMPLEXITY', 'RESEARCH_DEPTH', 'PRODUCT_BUILD',
+  'SHALLOW_TASK',
 ];
 const NEGATIVE_CATEGORY_NAMES = ['TRIVIAL_INTENT', 'SIMPLE_TASK', 'SIMPLICITY_REQUEST'];
 // Structural-signal categories are attached to specific positive categories
@@ -75,9 +76,18 @@ const NEGATIVE_CATEGORY_NAMES = ['TRIVIAL_INTENT', 'SIMPLE_TASK', 'SIMPLICITY_RE
 // RESEARCH_STRUCTURE -> researchDepth). researchDepth arrived with classifier
 // 1.3.0; the C# scorer is generic over categories and structural lists, so these
 // two table entries are the entire desktop-side change for it.
+// PRODUCT_BUILD (classifier 1.5.0) is the same kind of change: one lexicon
+// category plus one structural list. Its structural list is BUILT by a function
+// in complexity.js rather than written as literals (seven patterns share one
+// product list), so it is extracted from its sentinel region instead of as an
+// array literal — see extractStructuralRegion().
 const STRUCTURAL_FOR_CATEGORY = {
   CODING: 'CODE_STRUCTURE', DEBUGGING: 'STACK_STRUCTURE', RESEARCH_DEPTH: 'RESEARCH_STRUCTURE',
+  PRODUCT_BUILD: 'PRODUCT_BUILD_STRUCTURE',
 };
+// Structural lists that live inside a `// <cfai:NAME>` … `// </cfai:NAME>`
+// region of complexity.js instead of a `const X = [ … ];` literal.
+const STRUCTURAL_REGIONS = { PRODUCT_BUILD_STRUCTURE: 'product-build' };
 
 const THRESHOLD_NAMES = [
   'COMPLEX_AT', 'SIMPLE_AT', 'STRONG_WEIGHT', 'CAP_PER_CATEGORY',
@@ -130,10 +140,39 @@ function extractLexiconCategory(source, constName) {
  * C# reconstructs it as `new Regex(source, flags-mapped-to-RegexOptions)`.
  */
 function extractStructuralSignals(source, constName) {
-  const entries = evalArrayLiteral(sliceBalancedArray(source, constName));
+  const entries = STRUCTURAL_REGIONS[constName]
+    ? extractStructuralRegion(source, STRUCTURAL_REGIONS[constName], constName)
+    : evalArrayLiteral(sliceBalancedArray(source, constName));
   return entries.map(({ key, weight, re }) => ({
     key, weight, source: re.source, flags: re.flags,
   }));
+}
+
+/**
+ * Evaluate a sentinel-delimited region of complexity.js in ISOLATION and return
+ * the structural list it declares. The region (`// <cfai:tag>` …
+ * `// </cfai:tag>`) is required to be self-contained — plain string lists and
+ * a builder function, no reference to anything outside it — so, like the array
+ * slices above, it runs with no free variables and no globals. Anything else in
+ * it (a window/document touch) would throw here, which is the point: the
+ * extraction fails loudly rather than shipping the enforcer a partial lexicon.
+ */
+function extractStructuralRegion(source, tag, constName) {
+  const open = `// <cfai:${tag}>`;
+  const close = `// </cfai:${tag}>`;
+  const a = source.indexOf(open);
+  const b = source.indexOf(close);
+  if (a < 0 || b < a) throw new Error(`model-router-config: region <cfai:${tag}> not found in source`);
+  if (source.indexOf(open, a + 1) >= 0) throw new Error(`model-router-config: region <cfai:${tag}> appears twice`);
+  const region = source.slice(a + open.length, b);
+  // eslint-disable-next-line no-new-func
+  const list = new Function(`'use strict';
+${region}
+return ${constName};`)();
+  if (!Array.isArray(list) || !list.every((e) => e && typeof e.key === 'string' && e.re instanceof RegExp)) {
+    throw new Error(`model-router-config: ${constName} is not a list of {key, weight, re}`);
+  }
+  return list;
 }
 
 /**

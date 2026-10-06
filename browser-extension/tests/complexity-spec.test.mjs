@@ -65,22 +65,23 @@ test('the spec states the analysis window the code uses', () => {
 // The category count the spec states. If someone adds or removes a category, the
 // spec's "thirteen compiled categories / ten positive" claim has to move with it
 // (researchDepth, classifier 1.3.0, made it ten; the 1.4.0 small-talk step is a
-// shape test, not a category, so the counts did not move).
+// shape test, not a category, so the counts did not move; productBuild, 1.5.0,
+// made it eleven).
 test('the spec states the real category counts', () => {
   // Count only the entries INSIDE the POSITIVE array — the three negative
   // categories are compiled by the same helper just below it, so a whole-file
-  // count of compileCategory( is 13 and says nothing about the split.
+  // count of compileCategory( is 14 and says nothing about the split.
   const from = src.indexOf('const POSITIVE = [');
   assert.ok(from > 0, 'POSITIVE array not found');
   const positiveBlock = src.slice(from, src.indexOf('];', from));
   const positive = (positiveBlock.match(/compileCategory\('/g) || []).length;
   const negatives = ['CAT_SIMPLE_TASK', 'CAT_SIMPLICITY_REQUEST', 'CAT_TRIVIAL_INTENT']
     .filter((n) => src.includes(n)).length;
-  assert.equal(positive, 10, 'positive category count changed — update the spec table');
-  assert.equal(positive + negatives, 13, 'total category count changed — update the spec');
+  assert.equal(positive, 11, 'positive category count changed — update the spec table');
+  assert.equal(positive + negatives, 14, 'total category count changed — update the spec');
   assert.equal(negatives, 3, 'negative category count changed — update the spec table');
-  assert.match(doc, /Thirteen compiled categories/i);
-  assert.match(doc, /Ten contribute positively, three negatively/i);
+  assert.match(doc, /Fourteen compiled categories/i);
+  assert.match(doc, /Eleven contribute positively, three negatively/i);
 });
 
 // `architect*` at weight 6 is the one term the spec calls out in bold, because it
@@ -118,6 +119,11 @@ const WORKED_EXAMPLES = [
   ['good morning', 'simple'],
   ['how are you doing today?', 'simple'],
   ['hi, please do deep research on EU AI regulation', 'complex'],
+  ['create a replica of whatsapp', 'complex'],
+  ['build a full e-commerce website with payments', 'complex'],
+  ['write a todo app in react', 'moderate'],
+  ['create a login page', 'moderate'],
+  ['how does instagram make money', 'moderate'],
 ];
 
 test('every worked example in the spec is reproducible', () => {

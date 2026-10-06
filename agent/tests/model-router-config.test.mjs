@@ -154,6 +154,28 @@ test('RESEARCH_DEPTH (classifier 1.3.0) is extracted with its structural signal'
   for (const sig of research.structural) assert.doesNotThrow(() => new RegExp(sig.source, sig.flags));
 });
 
+test('PRODUCT_BUILD (classifier 1.5.0) is extracted with its region-built structural signals', () => {
+  const cfg = buildModelRouterConfig();
+  const names = cfg.positiveCategories.map((c) => c.name);
+  assert.ok(names.includes('PRODUCT_BUILD'), 'PRODUCT_BUILD missing — "create a replica of whatsapp" would be moderate on the desktop');
+  const pb = cfg.positiveCategories.find((c) => c.name === 'PRODUCT_BUILD');
+  assert.ok(pb.terms.some((t) => t.term === 'clone of' && t.weight === 2));
+  const keys = pb.structural.map((s) => s.key);
+  for (const k of ['#product-clone', '#product-suffix', '#product-like', '#product-clone-name', '#whole-app', '#full-stack-scope', '#feature-scope']) {
+    assert.ok(keys.includes(k), `${k} missing`);
+  }
+  for (const sig of pb.structural) {
+    assert.equal(sig.weight, 6);
+    const re = new RegExp(sig.source, sig.flags);
+    assert.doesNotThrow(() => re.test('x'));
+  }
+  // The case-sensitive proper-noun pattern must stay case-sensitive in transit.
+  assert.equal(pb.structural.find((s) => s.key === '#product-clone-name').flags, '');
+  const clone = pb.structural.find((s) => s.key === '#product-clone');
+  assert.ok(new RegExp(clone.source, clone.flags).test('create a replica of whatsapp'));
+  assert.ok(!new RegExp(clone.source, clone.flags).test('what is a whatsapp'));
+});
+
 test('buildModelRouterConfig output is JSON-serializable and within a sane env-var size budget', () => {
   const cfg = buildModelRouterConfig();
   const json = JSON.stringify(cfg);

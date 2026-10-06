@@ -186,7 +186,7 @@ test('the router config carries the shared catalog and no retired label table', 
   // Gemini's labels are the catalog's measured lineup.
   const g = cfg.catalog.hosts['gemini.google.com'].tiers;
   assert.deepEqual([g.economy.click_labels[0], g.standard.click_labels[0], g.premium.click_labels[0]],
-    ['3.5 Flash-Lite', '3.8 Flash', '3.1 Pro']);
+    ['3.5 Flash-Lite', '3.6 Flash', '3.1 Pro']);
 });
 
 // ══ 2. NO-OP ══════════════════════════════════════════════════════════════

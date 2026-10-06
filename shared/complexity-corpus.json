@@ -626,6 +626,186 @@
       "id": "edge-107",
       "group": "edge",
       "text": "café good morning"
+    },
+    {
+      "id": "product-001",
+      "group": "product_build",
+      "text": "create a replica of whatsapp",
+      "expect": "complex"
+    },
+    {
+      "id": "product-002",
+      "group": "product_build",
+      "text": "Create a replica of WhatsApp",
+      "expect": "complex"
+    },
+    {
+      "id": "product-003",
+      "group": "product_build",
+      "text": "build a clone of instagram",
+      "expect": "complex"
+    },
+    {
+      "id": "product-004",
+      "group": "product_build",
+      "text": "build a full e-commerce website with payments",
+      "expect": "complex"
+    },
+    {
+      "id": "product-005",
+      "group": "product_build",
+      "text": "build me an uber clone",
+      "expect": "complex"
+    },
+    {
+      "id": "product-006",
+      "group": "product_build",
+      "text": "make an airbnb-like app",
+      "expect": "complex"
+    },
+    {
+      "id": "product-007",
+      "group": "product_build",
+      "text": "develop a website like amazon",
+      "expect": "complex"
+    },
+    {
+      "id": "product-008",
+      "group": "product_build",
+      "text": "I want a clone of Netflix",
+      "expect": "complex"
+    },
+    {
+      "id": "product-009",
+      "group": "product_build",
+      "text": "build a clone of Acme",
+      "expect": "complex"
+    },
+    {
+      "id": "product-010",
+      "group": "product_build",
+      "text": "build a full-stack MERN social media app",
+      "expect": "complex"
+    },
+    {
+      "id": "product-011",
+      "group": "product_build",
+      "text": "build a chat app with authentication and real-time messaging",
+      "expect": "complex"
+    },
+    {
+      "id": "product-012",
+      "group": "product_build",
+      "text": "build the frontend and backend for my startup",
+      "expect": "complex"
+    },
+    {
+      "id": "product-013",
+      "group": "product_build",
+      "text": "make a replica of uber in flutter",
+      "expect": "complex"
+    },
+    {
+      "id": "product-014",
+      "group": "product_build",
+      "text": "create a complete e-commerce store with cart and checkout",
+      "expect": "complex"
+    },
+    {
+      "id": "product-015",
+      "group": "product_build",
+      "text": "write a todo app in react",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-016",
+      "group": "product_build",
+      "text": "create a login page",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-017",
+      "group": "product_build",
+      "text": "create a login page with authentication",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-018",
+      "group": "product_build",
+      "text": "write a todo app with a database",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-019",
+      "group": "product_build",
+      "text": "what is a whatsapp",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-020",
+      "group": "product_build",
+      "text": "how does instagram make money",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-021",
+      "group": "product_build",
+      "text": "what is the difference between frontend and backend",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-022",
+      "group": "product_build",
+      "text": "what is a full stack developer",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-023",
+      "group": "product_build",
+      "text": "make a copy of my gmail signature",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-024",
+      "group": "product_build",
+      "text": "make a full list of apps",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-025",
+      "group": "product_build",
+      "text": "make the app full screen",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-026",
+      "group": "product_build",
+      "text": "write a complete system prompt for a tutor",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-027",
+      "group": "product_build",
+      "text": "how do I clone a github repo",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-028",
+      "group": "product_build",
+      "text": "create a replica of the Eiffel tower",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-029",
+      "group": "product_build",
+      "text": "build a youtube downloader",
+      "expect": "moderate"
+    },
+    {
+      "id": "product-030",
+      "group": "product_build",
+      "text": "explain like im 5 how to build a clone of whatsapp",
+      "expect": "moderate"
     }
   ]
 }

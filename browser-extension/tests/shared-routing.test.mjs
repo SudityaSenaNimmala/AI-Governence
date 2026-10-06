@@ -181,8 +181,8 @@ test('Gemini labels: the agent web arm clicks the catalog labels (ai-processes.j
   assert.equal(g.premium.click_labels[0], m[3]);
   assert.equal(g.standard.click_labels[0], m[2]);
   assert.equal(g.economy.click_labels[0], m[1]);
-  // The live-measured 2026-09-22 menu strings, unchanged.
-  assert.deepEqual({ ...m }, { 3: '3.1 Pro', 2: '3.8 Flash', 1: '3.5 Flash-Lite' });
+  // The live-measured menu strings (re-checked 2026-10-06: Flash is now 3.6).
+  assert.deepEqual({ ...m }, { 3: '3.1 Pro', 2: '3.6 Flash', 1: '3.5 Flash-Lite' });
 });
 
 test('claude.ai labels: the agent web arm clicks the catalog labels (ai-processes.js claude_web modelPicker)', () => {

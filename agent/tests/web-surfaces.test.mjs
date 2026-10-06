@@ -899,7 +899,7 @@ test('AI-216: gemini.google.com ships ARMED, with its live-measured signature', 
   assert.equal(mp.provider, 'google');
   // Delta 4: the button and the menu name the same model DIFFERENTLY, so the
   // strings we CLICK are not the strings we READ.
-  assert.deepEqual(mp.tierLabels, { 3: '3.1 Pro', 2: '3.8 Flash', 1: '3.5 Flash-Lite' });
+  assert.deepEqual(mp.tierLabels, { 3: '3.1 Pro', 2: '3.6 Flash', 1: '3.5 Flash-Lite' });
   assert.deepEqual(mp.buttonTierLabels, { 3: 'Pro', 2: 'Flash', 1: 'Flash-Lite' });
   // 'Extended thinking' is a SECOND AXIS, not a tier — Gemini's analogue of
   // Claude's Effort. It appears in the live menu and must never be a target.

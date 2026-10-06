@@ -85,12 +85,12 @@
     "gemini.google.com": {
       "provider": "google",
       "verified": true,
-      "evidence": "agent/src/os_monitor/ai-processes.js gemini_web modelPicker, live pass 2026-09-22: button 'Open mode picker, currently Pro'; items '3.5 Flash-Lite Fastest answers', '3.8 Flash All-around help New', 'Selected 3.1 Pro Advanced reasoning', 'Extended thinking Complex problem solving'. 'Extended thinking' is an effort-like axis, never a tier.",
+      "evidence": "agent/src/os_monitor/ai-processes.js gemini_web modelPicker, live pass 2026-09-22, re-checked 2026-10-06 (menu now '3.5 Flash-Lite Fastest answers', '3.6 Flash All-around help', '3.1 Pro Advanced reasoning'; button shows short name e.g. 'Flash-Lite'): button 'Open mode picker, currently Pro'; items '3.5 Flash-Lite Fastest answers', '3.8 Flash All-around help New', 'Selected 3.1 Pro Advanced reasoning', 'Extended thinking Complex problem solving'. 'Extended thinking' is an effort-like axis, never a tier.",
       "picker": { "name_prefix": "Open mode picker,", "item_control_types": ["MenuItem"], "item_selected_prefix": "Selected " },
       "effort": { "supported": false, "verified": false },
       "tiers": {
         "premium":  { "click_labels": ["3.1 Pro", "Pro"],                 "button_label_patterns": ["Pro", "3.1 Pro", "Ultra"], "verified": true },
-        "standard": { "click_labels": ["3.8 Flash"],                      "button_label_patterns": ["Flash", "3.8 Flash", "Thinking"], "verified": true },
+        "standard": { "click_labels": ["3.6 Flash", "3.8 Flash", "Flash"], "button_label_patterns": ["Flash", "3.6 Flash", "3.8 Flash", "Thinking"], "verified": true },
         "economy":  { "click_labels": ["3.5 Flash-Lite", "Flash-Lite"],   "button_label_patterns": ["Flash-Lite", "Flash Lite", "3.5 Flash-Lite"], "verified": true }
       }
     },
@@ -101,7 +101,7 @@
       "effort": { "supported": false, "verified": false },
       "tiers": {
         "premium":  { "click_labels": ["3.1 Pro", "Pro"],               "button_label_patterns": ["Pro", "Ultra"], "verified": false },
-        "standard": { "click_labels": ["3.8 Flash"],                    "button_label_patterns": ["Flash"], "verified": false },
+        "standard": { "click_labels": ["3.6 Flash", "3.8 Flash", "Flash"], "button_label_patterns": ["Flash"], "verified": false },
         "economy":  { "click_labels": ["3.5 Flash-Lite", "Flash-Lite"], "button_label_patterns": ["Flash-Lite", "Flash Lite"], "verified": false }
       }
     },

@@ -353,7 +353,7 @@ test('web route: "Sonnet 5.5" is read as standard on claude.ai, through the shar
   assert.deepEqual(labels('claude.ai', 'standard'), ['Sonnet 5.5', 'Sonnet 5', 'Sonnet']);
   assert.deepEqual(labels('claude.ai', 'economy'), ['Haiku 4.5', 'Haiku']);
   assert.deepEqual(labels('claude.ai', 'premium'), ['Opus 5.5', 'Opus 5', 'Opus']);
-  assert.deepEqual(labels('gemini.google.com', 'standard'), ['3.8 Flash']);
+  assert.deepEqual(labels('gemini.google.com', 'standard'), ['3.6 Flash', '3.8 Flash', 'Flash']);
   assert.deepEqual(labels('nowhere.example', 'standard'), []);
 });
 

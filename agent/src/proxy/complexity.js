@@ -26,9 +26,10 @@
 //     'moderate'. Length is not difficulty. There is no length input anywhere
 //     in this file.
 //
-// What replaces it: a weighted lexicon of thirteen categories (ten positive
+// What replaces it: a weighted lexicon of fourteen categories (eleven positive
 // signals, three negative) plus a few structural signals (code fences, stack
-// traces, enumerated multi-part questions). Score maps to one of exactly three
+// traces, enumerated multi-part questions, whole-product build requests).
+// Score maps to one of exactly three
 // tiers.
 //
 // PRIVACY: this file reads prompt text and returns a single enum. It never
@@ -58,7 +59,14 @@
   // so a "good morning" on a premium model was routed DOWN only to standard.
   // Also moved the arithmetic regexes into ARITHMETIC_SHAPE (same patterns) so
   // the desktop enforcer receives them as data, and added classifyDetailed().
-  const VERSION = '1.4.0';
+  // 1.5.0 — added the productBuild category (lexicon + PRODUCT_BUILD_STRUCTURE):
+  // a request to build a WHOLE product ("create a replica of whatsapp", "build a
+  // clone of instagram", "build a full e-commerce website with payments") is
+  // 'complex'. Every one of those scored 0 and fell to the no-opinion
+  // 'moderate', so a whole-app build was routed to a mid/economy model. A
+  // single component ("create a login page", "write a todo app in react")
+  // still matches none of it and stays 'moderate'.
+  const VERSION = '1.5.0';
 
   // Tier thresholds. Tuned against the acceptance table in tests/complexity.test.mjs.
   const COMPLEX_AT = 6;
@@ -282,6 +290,15 @@
     ['nuanced', 2],
   ];
 
+  // Whole-product builds (1.5.0). The real signal is structural — see
+  // PRODUCT_BUILD_STRUCTURE, which needs a build verb and reaches COMPLEX_AT on
+  // its own. These few words are only weak corroboration: "full stack" or
+  // "clone of" alone ("what is a full stack developer") stays well below it.
+  const PRODUCT_BUILD = [
+    ['full-stack', 2], ['full stack', 2], ['fullstack', 2],
+    ['clone of', 2], ['replica of', 2],
+  ];
+
   // Catch-all for real-but-easy asks, so they land above a bare 0 and are
   // distinguishable from "no signal at all". Overlap with the categories above
   // is deliberate and harmless: the per-category cap bounds what any single idea
@@ -361,6 +378,143 @@
   const RESEARCH_STRUCTURE = [
     { key: '#enumerated-parts', weight: 3, re: /(^|\n)[ \t]*3[.)][ \t]+\S/ },
   ];
+
+  // ── Whole-product builds (1.5.0) ───────────────────────────────────────────
+  //
+  // "create a replica of whatsapp" is a request for an entire product: auth,
+  // messaging, storage, real-time delivery, several clients. It matched no term
+  // at all, scored 0 and was routed to the standard (or, after a downgrade
+  // rule, economy) tier. These are the asks that most need the premium model.
+  //
+  // The signal is a PHRASE SHAPE, not a word list. Each pattern requires a
+  // build verb (build / create / make / develop / implement / design / code /
+  // write / clone, or want / need) followed IN THE SAME SENTENCE by one of:
+  //   #product-clone      clone|replica|copy|version of <known product>
+  //   #product-suffix     a <known product> clone, an <known product>-like app
+  //   #product-like       an app|website|platform like <known product>
+  //   #product-clone-name clone of <Proper Noun> (case-sensitive: "clone of Acme")
+  //   #whole-app          a full|complete|entire|end-to-end|production-ready|
+  //                       scalable|full-stack|fully functional <app|website|
+  //                       platform|system|SaaS|marketplace|e-commerce…>
+  //   #full-stack-scope   frontend AND backend
+  //   #feature-scope      <app|website|platform…> with <feature> … <feature>
+  //                       (two of auth, payments, real-time, database, chat, …)
+  // Each signal weighs COMPLEX_AT, so any ONE is enough. Without the build verb
+  // nothing fires: "what is whatsapp", "how does instagram make money" stay
+  // where the rest of the lexicon puts them. A single component ("create a
+  // login page", "write a todo app in react") has no product, no whole-app
+  // modifier and no second feature, so it is untouched.
+  //
+  // The patterns are assembled from plain string lists by
+  // buildProductStructure(), inside the <cfai:product-build> sentinels. The
+  // desktop enforcer receives the compiled {source, flags} (model-router-
+  // config.js evaluates the region in isolation), so the region must stay
+  // self-contained: no reference to anything outside it, and every construct
+  // must be one .NET's Regex accepts once \b \w \d \s are given their JS
+  // meanings (lookahead, lazy {m,n}, classes — no lookbehind, no named groups,
+  // no inline flags). Each gap is bounded ({0,40}, at most 3 words) so the
+  // scan stays linear on the 4 KB window.
+  // <cfai:product-build>
+  function buildProductStructure() {
+    const alt = (list) => list.join('|');
+    // Build intent. `want`/`need` cover "I want a clone of uber".
+    const VERBS = [
+      'build(?:s|ing)?', 'built', 'creat(?:e|es|ing|ed)', 'mak(?:e|es|ing)', 'made',
+      'develop(?:s|ing|ed)?', 'implement(?:s|ing|ed)?', 'design(?:s|ing|ed)?',
+      'cod(?:e|ing)', 'writ(?:e|es|ing)', 'program(?:s|ming)?', 'recreat(?:e|es|ing)',
+      'replicat(?:e|es|ing)', 'clon(?:e|es|ing)', 'wants?', 'needs?',
+    ];
+    // Well-known products whose names carry a whole feature set. Lower-case;
+    // the patterns using this list are case-insensitive. Deliberately absent:
+    // words that are also ordinary English in this position ("medium",
+    // "signal", "threads", "line", bare "x") — "a version of medium
+    // difficulty" is not a build. Unlisted products still reach
+    // #product-clone-name when capitalised ("clone of Acme").
+    const PRODUCTS = [
+      'whatsapp', 'instagram', 'uber', 'airbnb', 'netflix', 'youtube', 'twitter', 'x\\.com',
+      'facebook', 'messenger', 'slack', 'spotify', 'amazon', 'tiktok', 'zoom', 'discord', 'notion',
+      'gmail', 'linkedin', 'swiggy', 'zomato', 'snapchat', 'pinterest', 'reddit', 'telegram',
+      'wechat', 'tinder', 'quora', 'ebay', 'flipkart', 'myntra', 'paytm', 'phonepe', 'paypal',
+      'venmo', 'stripe', 'shopify', 'etsy', 'doordash', 'lyft', 'ola', 'rapido', 'trello', 'jira',
+      'asana', 'figma', 'canva', 'dropbox', 'google\\s+drive', 'google\\s+docs', 'google\\s+maps',
+      'google\\s+meet', 'microsoft\\s+teams', 'ms\\s+teams', 'outlook', 'github',
+      'stack\\s*overflow', 'wikipedia', 'duolingo', 'coursera', 'udemy', 'hotstar',
+      'prime\\s+video', 'twitch', 'booking\\.com', 'expedia', 'tripadvisor', 'yelp', 'zillow',
+      'robinhood', 'coinbase', 'calendly', 'clickup', 'miro', 'evernote', 'chatgpt', 'imessage',
+    ];
+    // A product name followed by one of these is a PART of that product ("a
+    // copy of zoom level", "a copy of gmail signature"), not the product.
+    // Not "in"/"out": "a replica of uber in flutter" is the whole product.
+    const PART_OF = [
+      'level', 'levels', 'function', 'method', 'class', 'api', 'sdk', 'button', 'icon',
+      'logo', 'link', 'account', 'file', 'feature', 'bot', 'integration', 'plugin', 'page', 'repo',
+      'repository', 'template', 'signature', 'email', 'inbox', 'message', 'draft', 'invoice',
+      'webhook', 'key', 'keys', 'difficulty', 'size', 'post', 'video', 'playlist', 'story', 'profile',
+    ];
+    // Whole-product scope. `full` is fenced off from "full screen" & co.
+    const WHOLE = [
+      'full(?![\\s-]*(?:screen|width|height|page|name|size|text|list|stop|time|day)\\b)',
+      'complete', 'entire', 'end[\\s-]to[\\s-]end', 'production[\\s-](?:ready|grade)',
+      'enterprise[\\s-]grade', 'scalable', 'full[\\s-]?stack', 'fully[\\s-]functional',
+      'fully[\\s-]featured', 'feature[\\s-]complete',
+    ];
+    // What a whole product is called. `system prompt` is not a system.
+    const PRODUCT_NOUNS = [
+      'apps?', 'applications?', 'web\\s*apps?', 'web\\s*sites?', 'websites?', 'platforms?',
+      'systems?(?![\\s-]*prompts?\\b)', 'saas', 'marketplaces?', 'e-?commerce', 'online\\s+stores?',
+      'social\\s+(?:network|media)', 'mvp',
+    ];
+    // Components that, two at a time, make an app a multi-part system.
+    const FEATURES = [
+      'auth(?:entication|orization)?', 'log[\\s-]?ins?', 'sign[\\s-]?(?:ups?|ins?)',
+      'user\\s+accounts?', 'payments?', 'payment\\s+gateway', 'checkout', 'subscriptions?',
+      'real[\\s-]?time', 'live\\s+chat', 'chat', 'messaging', 'notifications?', 'databases?', 'db',
+      'admin\\s+(?:panel|dashboard)', 'dashboards?', 'search', 'video\\s+call(?:s|ing)?',
+      'file\\s+uploads?', 'shopping\\s+cart', 'cart', 'reviews', 'ratings', 'geolocation', 'maps?',
+      'web\\s*sockets?', 'apis?', 'backend', 'back-end',
+    ];
+
+    const VERB = '\\b(?:' + alt(VERBS) + ')\\b';
+    // Same sentence, bounded: never across . ? ! or a line break.
+    const GAP = '[^.?!\\n]{0,40}?';
+    const PRODUCT_NAME = '(?:' + alt(PRODUCTS) + ')';
+    const PRODUCT = PRODUCT_NAME + '\\b(?![\\s-]+(?:' + alt(PART_OF) + ')\\b)';
+    // Up to three words between a modifier and its noun ("full-stack MERN
+    // social media app"), none of them a preposition — so "a full list of
+    // apps" does not read as a full app.
+    const WORDS = '(?:[\\s-]+(?!(?:of|for|about|on|in|to|with|from|and|or|into)\\b)[^\\s.?!,;:]+){0,3}?[\\s-]+';
+    // Case-SENSITIVE verbs for the proper-noun pattern, which cannot use /i
+    // (with /i, [A-Z] would match any letter). JS and .NET both lack portable
+    // inline flags, so the case folding is spelled out.
+    const VERB_CASED = '\\b(?:[Bb]uild(?:s|ing)?|[Bb]uilt|[Cc]reat(?:e|es|ing)|[Mm]ak(?:e|es|ing)|'
+      + '[Dd]evelop(?:s|ing)?|[Ii]mplement(?:s|ing)?|[Dd]esign(?:s|ing)?|[Cc]od(?:e|ing)|[Pp]rogram)\\b';
+
+    return [
+      { key: '#product-clone', weight: 6, re: new RegExp(
+        VERB + GAP + '\\b(?:clone|replica|copy|version)\\s+of\\s+(?:the\\s+)?' + PRODUCT, 'i') },
+      { key: '#product-suffix', weight: 6, re: new RegExp(
+        VERB + GAP + '\\b' + PRODUCT_NAME + '(?:(?:[\\s-]+(?:like|style|inspired))?[\\s-]+(?:clone|replica)'
+        + '|[\\s-]+(?:like|style|inspired)[\\s-]+(?:apps?|application|web\\s*app|websites?|platform|site|service|marketplace))\\b', 'i') },
+      { key: '#product-like', weight: 6, re: new RegExp(
+        VERB + GAP + '\\b(?:apps?|application|web\\s*app|websites?|platform|site|service|marketplace|clone)\\s+'
+        + '(?:(?:just|exactly)\\s+)?(?:like|similar\\s+to)\\s+' + PRODUCT, 'i') },
+      { key: '#product-clone-name', weight: 6, re: new RegExp(
+        VERB_CASED + GAP + '\\b[Cc]lone\\s+of\\s+[A-Z][A-Za-z0-9]', '') },
+      { key: '#whole-app', weight: 6, re: new RegExp(
+        VERB + GAP + '\\b(?:' + alt(WHOLE) + ')' + WORDS + '(?:' + alt(PRODUCT_NOUNS) + ')\\b', 'i') },
+      { key: '#full-stack-scope', weight: 6, re: new RegExp(
+        VERB + '[^.?!\\n]{0,80}?\\b(?:front[\\s-]?end\\b[^.?!\\n]{0,60}?\\bback[\\s-]?end'
+        + '|back[\\s-]?end\\b[^.?!\\n]{0,60}?\\bfront[\\s-]?end)\\b', 'i') },
+      { key: '#feature-scope', weight: 6, re: new RegExp(
+        VERB + GAP + '\\b(?:' + alt(PRODUCT_NOUNS) + ')\\b[^.?!\\n]{0,40}?\\b(?:with|including|featuring|that\\s+(?:has|have|supports?))\\b'
+        // Two DIFFERENT features: the one capture group in these patterns holds
+        // the first, and (?!\1\b) refuses it as the second — otherwise "a todo
+        // app with a database" pasted twice reads as two features.
+        + '[^.?!\\n]{0,60}?\\b(' + alt(FEATURES) + ')\\b[^.?!\\n]{0,60}?\\b(?!\\1\\b)(?:' + alt(FEATURES) + ')\\b', 'i') },
+    ];
+  }
+  const PRODUCT_BUILD_STRUCTURE = buildProductStructure();
+  // </cfai:product-build>
 
   // ── Pure arithmetic ────────────────────────────────────────────────────────
   //
@@ -555,6 +709,7 @@
     compileCategory('analysis', ANALYSIS),
     compileCategory('outputComplexity', OUTPUT_COMPLEXITY),
     compileCategory('researchDepth', RESEARCH_DEPTH, RESEARCH_STRUCTURE),
+    compileCategory('productBuild', PRODUCT_BUILD, PRODUCT_BUILD_STRUCTURE),
     compileCategory('shallowTask', SHALLOW_TASK),
   ];
 
