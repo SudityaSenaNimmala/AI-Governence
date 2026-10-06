@@ -282,7 +282,7 @@ if ($hasAwait) {
       if ($script:W.switchAt -ne $null -and $script:W.now -ge $script:W.switchAt) { return [string]$script:W.target }
       return [string]$script:W.label
     }
-    SetDelegate $io 'TierOf' { param([string]$l) [string](Call 'MrTierOfLabel' @('desktop_app', 'claude_desktop', $l)) }
+    SetDelegate $io 'TierOf' { param([string]$l) [string](Call 'MrTierOfLabel' @($script:TS, $script:TH, $l)) }
     SetDelegate $io 'RetryActivate' {
       $script:W.retries++
       if ($script:W.dialogOnRetry) { $script:W.dialogAt = $script:W.now + 200 }
@@ -320,6 +320,7 @@ if ($hasAwait) {
             labelAfter = [string](OutF $o 'LabelAfter'); sendPath = $(if ($switched) { 'routed' } else { 'fallback' }) }
   }
 
+  $script:TS = 'desktop_app'; $script:TH = 'claude_desktop'
   RunWorld 'no_dialog_switches'      @{ switchAt = 200 }                                    $cfg $true
   RunWorld 'dialog_confirmed'        @{ dialogAt = 120 }                                    $cfg $true
   RunWorld 'dialog_after_retry'      @{ dialogOnRetry = $true }                             $cfg $true
@@ -382,6 +383,117 @@ if ($hasRefocus) {
   RunRefocus 'other_app_foreground'       @{ window = 'other'; setFocusWorks = $true }
   RunRefocus 'same_process_modal'         @{ window = 'same_process'; setFocusWorks = $true }
   RunRefocus 'same_process_stuck'         @{ window = 'same_process'; restoreFixes = $false; setFocusWorks = $true }
+}
+
+# ---- 8. the WEB arm on the desktop arm's machinery (claude.ai in a browser) --
+# Live 2026-10-06 (agent 1307630, no extension in the browser):
+#   desktop_web_uia claude.ai failed simple Sonnet 5.5 -> Haiku 4.5
+#   reason from_tier_not_confirmed_fallback_not_submitted
+# with the model menu left OPEN ("Sonnet 5.5 ...", "Effort Medium >",
+# "More models >") and the prompt unsent.
+
+# 8a. the labels the web arm now reads: the shared catalog's, for the browser.
+foreach ($lbl in @('Model: Sonnet 5.5 Medium', 'Model: Sonnet 5.5', 'Model: Haiku 4.5', 'Model: Opus 5.5 High', 'Model: Opus 5 High')) {
+  Emit @{ t = 'webtierof'; label = $lbl; tier = [string](Call 'MrTierOfLabel' @('browser', 'claude.ai', $lbl)) }
+}
+$hasLabels = Has 'MrClickLabelsFor'
+Emit @{ t = 'has'; name = 'MrClickLabelsFor'; present = $hasLabels }
+if ($hasLabels) {
+  foreach ($tier in @('premium', 'standard', 'economy')) {
+    Emit @{ t = 'weblabels'; host = 'claude.ai'; tier = $tier; labels = @(Call 'MrClickLabelsFor' @('browser', 'claude.ai', $tier)) }
+  }
+  Emit @{ t = 'weblabels'; host = 'gemini.google.com'; tier = 'standard'; labels = @(Call 'MrClickLabelsFor' @('browser', 'gemini.google.com', 'standard')) }
+  Emit @{ t = 'weblabels'; host = 'nowhere.example'; tier = 'standard'; labels = @(Call 'MrClickLabelsFor' @('browser', 'nowhere.example', 'standard')) }
+  Emit @{ t = 'weballlabels'; host = 'claude.ai'; labels = @(Call 'MrAllClickLabels' @('browser', 'claude.ai')) }
+}
+
+# 8b. the live 2026-10 claude.ai menu, item by item, through the item matcher
+# with the catalog labels the route walks (first unique match wins). The top
+# level shows the current model, Effort and More models; Haiku and Opus are in
+# the submenu.
+$TOP = @('Sonnet 5.5 Most efficient for simpler tasks', 'Effort Medium', 'More models')
+$SUB = @('Opus 5.5 Most capable for complex work', 'Haiku 4.5 Fastest for quick answers', 'Opus 5 Previous generation', 'Sonnet 5 Previous generation')
+function FirstUnique([string[]]$names, $labels) {
+  foreach ($l in $labels) {
+    $hits = @($names | Where-Object { [bool](Call 'ModelItemNameMatches' @([string]$_, [string]$l)) })
+    if ($hits.Count -eq 1) { return @{ label = [string]$l; item = [string]$hits[0] } }
+  }
+  return $null
+}
+if ($hasLabels) {
+  foreach ($c in @(
+      @('from_standard_top',   'standard', 'top'),
+      @('target_economy_top',  'economy',  'top'),
+      @('target_economy_sub',  'economy',  'sub'),
+      @('target_premium_top',  'premium',  'top'),
+      @('target_premium_sub',  'premium',  'sub'))) {
+    $names = $(if ($c[2] -eq 'top') { $TOP } else { $TOP + $SUB })
+    $hit = FirstUnique $names @(Call 'MrClickLabelsFor' @('browser', 'claude.ai', $c[1]))
+    Emit @{ t = 'webitem'; case = $c[0]; found = ($hit -ne $null); label = $(if ($hit) { $hit.label } else { '' }); item = $(if ($hit) { $hit.item } else { '' }) }
+  }
+  # The OLD source of the from-tier label (ai-processes.js tierLabels 2026-09-22).
+  Emit @{ t = 'webitem'; case = 'old_label_sonnet_5'; found = [bool](Call 'ModelItemNameMatches' @($TOP[0], 'Sonnet 5')) }
+  # "More models" is never a tier, and is what the hover step looks for.
+  $more = [string]$T.GetField('ROUTE_MORE_MODELS_LABEL', $FLAGS).GetValue($null)
+  Emit @{ t = 'webmore'; label = $more; matchesItem = [bool](Call 'ModelItemNameMatches' @('More models', $more));
+          anyTierMatches = [bool]((FirstUnique @('More models') @(Call 'MrAllClickLabels' @('browser', 'claude.ai'))) -ne $null) }
+}
+
+# 8c. the confirm dialog on the web arm: the SAME RouteAwaitSwitch, with the
+# claude.ai host's catalog signature.
+if ($hasAwait) {
+  $wcfg = Call 'MrConfirmDialogCfg' @('browser', 'claude.ai')
+  Emit @{ t = 'webcfg'; host = 'claude.ai'; present = ($wcfg -ne $null);
+          prefix = $(if ($wcfg) { [string]$cfgType.GetField('ButtonPrefix').GetValue($wcfg) } else { '' }) }
+  Emit @{ t = 'webcfg'; host = 'www.claude.ai'; present = ((Call 'MrConfirmDialogCfg' @('browser', 'www.claude.ai')) -ne $null) }
+  Emit @{ t = 'webcfg'; host = 'gemini.google.com'; present = ((Call 'MrConfirmDialogCfg' @('browser', 'gemini.google.com')) -ne $null) }
+  Emit @{ t = 'webcfg'; host = 'chatgpt.com'; present = ((Call 'MrConfirmDialogCfg' @('browser', 'chatgpt.com')) -ne $null) }
+  Emit @{ t = 'webcfg'; host = 'api_proxy'; present = ((Call 'MrConfirmDialogCfg' @('api_proxy', 'claude.ai')) -ne $null) }
+  # Same scripted world as section 6, the web arm's own tier reader.
+  $script:TS = 'browser'; $script:TH = 'claude.ai'
+  RunWorld 'web_dialog_confirmed'      @{ dialogAt = 120; label = 'Model: Opus 5.5 Medium'; target = 'Model: Sonnet 5.5 Medium' } $wcfg $true
+  RunWorld 'web_dialog_never_confirms' @{ dialogAt = 120; confirmWorks = $false }                                         $wcfg $true
+  RunWorld 'web_no_dialog_switches'    @{ switchAt = 200 }                                                                $wcfg $true
+}
+
+# 8d. never leave the menu open: the REAL RouteCollapseMenu loop against a
+# scripted menu. Each Escape closes one level (submenu, then menu).
+$hasCollapse = Has 'RouteCollapseMenu'
+Emit @{ t = 'has'; name = 'RouteCollapseMenu'; present = $hasCollapse }
+if ($hasCollapse) {
+  $cIoType = $T.GetNestedType('RouteCollapseIo', $FLAGS)
+  $cOutType = $T.GetNestedType('RouteCollapseOutcome', $FLAGS)
+  function SetCDelegate($obj, [string]$field, [scriptblock]$sb) {
+    $f = $cIoType.GetField($field)
+    $f.SetValue($obj, [System.Management.Automation.LanguagePrimitives]::ConvertTo($sb, $f.FieldType))
+  }
+  function RunCollapse([string]$case, [hashtable]$world) {
+    $script:C = @{ levels = 0; patternCloses = $false; escapeWorks = $true; windowOk = $true;
+                   escapes = 0; patterns = 0; escapesWhenClosed = 0; now = 0 }
+    foreach ($k in $world.Keys) { $script:C[$k] = $world[$k] }
+    $io = [Activator]::CreateInstance($cIoType, $true)
+    SetCDelegate $io 'MenuOpen' { return [bool]($script:C.levels -gt 0) }
+    SetCDelegate $io 'CollapsePattern' { $script:C.patterns++; if ($script:C.patternCloses) { $script:C.levels = 0 } }
+    SetCDelegate $io 'WindowOk' { return [bool]$script:C.windowOk }
+    SetCDelegate $io 'SendEscape' {
+      $script:C.escapes++
+      if ($script:C.levels -le 0) { $script:C.escapesWhenClosed++ }
+      if ($script:C.escapeWorks -and $script:C.levels -gt 0) { $script:C.levels-- }
+    }
+    SetCDelegate $io 'Sleep' { param([int]$ms) $script:C.now += $ms }
+    $o = Call 'RouteCollapseMenu' @($io)
+    $closed = [bool]$cOutType.GetField('Closed').GetValue($o)
+    # What the fallback does with it: closed -> refocus + ONE Enter; else none.
+    Emit @{ t = 'collapse'; case = $case; closed = $closed; reason = [string]$cOutType.GetField('Reason').GetValue($o);
+            escapes = $script:C.escapes; patterns = $script:C.patterns; escapesWhenClosed = $script:C.escapesWhenClosed;
+            menuOpenAtEnd = ($script:C.levels -gt 0); elapsed = $script:C.now; enters = $(if ($closed) { 1 } else { 0 }) }
+  }
+  RunCollapse 'menu_not_open'            @{ levels = 0 }
+  RunCollapse 'live_menu_left_open'      @{ levels = 1 }
+  RunCollapse 'submenu_and_menu_open'    @{ levels = 2 }
+  RunCollapse 'pattern_closes_it'        @{ levels = 1; patternCloses = $true }
+  RunCollapse 'escape_ignored'           @{ levels = 1; escapeWorks = $false }
+  RunCollapse 'other_window_in_front'    @{ levels = 1; windowOk = $false }
 }
 
 Emit @{ t = 'done' }

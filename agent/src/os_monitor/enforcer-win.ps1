@@ -6514,6 +6514,32 @@ public static class CfaiEnforcer
         return te.ClickLabels[0];
     }
 
+    // EVERY catalog click label of one tier on this surface (with the policy's
+    // overrides), most specific first: ["Sonnet 5.5", "Sonnet 5", "Sonnet"].
+    // The web arm reads menu items through this -- the SAME labels the desktop
+    // arm and the extension use -- instead of the surface table's single
+    // 2026-09-22 name, which could not match "Sonnet 5.5" at the boundary and
+    // failed every claude.ai route as from_tier_not_confirmed.
+    static List<string> MrClickLabelsFor(string surface, string hostOrApp, string tier)
+    {
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        DrTierEntry te;
+        if (entry == null || string.IsNullOrEmpty(tier) || !entry.Tiers.TryGetValue(tier, out te)) return new List<string>();
+        return new List<string>(te.ClickLabels);
+    }
+
+    // The click labels of EVERY tier on this surface. Used only to answer "is a
+    // model menu showing right now?" (WebMenuLooksOpen): its items exist in the
+    // UIA tree only while it is open.
+    static List<string> MrAllClickLabels(string surface, string hostOrApp)
+    {
+        var all = new List<string>();
+        foreach (string t in DR_TIERS)
+            foreach (string l in MrClickLabelsFor(surface, hostOrApp, t))
+                if (!string.IsNullOrEmpty(l) && !all.Contains(l)) all.Add(l);
+        return all;
+    }
+
     static string RouteMetaFields(RouteMeta m)
     {
         if (m == null) return "";
@@ -7852,15 +7878,38 @@ public static class CfaiEnforcer
     const int ROUTE_CONFIRM_REINVOKE_MS = 600;
     const int ROUTE_CONFIRM_MAX_INVOKES = 2;
 
-    // The catalog's confirm-dialog signature for a DESKTOP app, or null.
+    // The catalog's confirm-dialog signature for a surface, or null: a DESKTOP
+    // app (catalog.apps.<app>) or a BROWSER host (catalog.hosts.<host>). The web
+    // arm runs the same RouteAwaitSwitch as the desktop arm, so claude.ai -- the
+    // same web app Claude Desktop renders, with the same "Switch model?" modal --
+    // gets the same auto-confirm. A host without the block (gemini) is never
+    // probed.
     static RouteConfirmCfg MrConfirmDialogCfg(string surface, string hostOrApp)
     {
-        if (!string.Equals(surface, "desktop_app", StringComparison.Ordinal)) return null;
-        var apps = DrObj(DrGet(_mrCatalog, "apps"));
+        string bucket;
+        if (string.Equals(surface, "desktop_app", StringComparison.Ordinal)) bucket = "apps";
+        else if (string.Equals(surface, "browser", StringComparison.Ordinal)) bucket = "hosts";
+        else return null;
+        var apps = DrObj(DrGet(_mrCatalog, bucket));
         if (apps == null) return null;
-        string want = DrLower(hostOrApp);
         Dictionary<string, object> app = null;
-        foreach (string k in apps.Keys) if (DrLower(k) == want) { app = DrObj(apps[k]); break; }
+        if (bucket == "hosts")
+        {
+            // The same host rule decideRoute's port uses (exact or dot-suffix,
+            // longest key wins), so the dialog and the tiers come from ONE entry.
+            string hoa = DrNormHostOrApp(hostOrApp);
+            int bestLen = 0;
+            foreach (string k in apps.Keys)
+            {
+                string kk = DrLower(k);
+                if (DrHostMatchesKey(hoa, kk) && kk.Length > bestLen) { app = DrObj(apps[k]); bestLen = kk.Length; }
+            }
+        }
+        else
+        {
+            string want = DrLower(hostOrApp);
+            foreach (string k in apps.Keys) if (DrLower(k) == want) { app = DrObj(apps[k]); break; }
+        }
         var cd = DrObj(DrGet(app, "confirm_dialog"));
         if (cd == null) return null;
         string prefix = DrGet(cd, "button_name_prefix") as string;
@@ -8752,6 +8801,287 @@ public static class CfaiEnforcer
         }
     }
 
+    // ════ THE WEB ARM ON THE DESKTOP ARM'S MACHINERY ═══════════════════════
+    //
+    // Live 2026-10-06 (agent 1307630, no extension in the browser, so THIS
+    // enforcer's web arm handled claude.ai in Chrome/Edge): Claude Desktop routed
+    // both ways, while every claude.ai route failed --
+    //   desktop_web_uia claude.ai failed simple Sonnet 5.5 -> Haiku 4.5
+    //   reason from_tier_not_confirmed_fallback_not_submitted
+    // -- with the model menu left OPEN ("Sonnet 5.5 ... (checked)", "Effort
+    // Medium >", "More models >") and the prompt unsent. Three causes:
+    //   1. The from-tier confirmation searched the menu for the surface table's
+    //      single 2026-09-22 name 'Sonnet 5' (ai-processes.js tierLabels), which
+    //      the boundary rule correctly refuses to match against 'Sonnet 5.5 ...'.
+    //   2. TryCollapsePicker (ExpandCollapse.Collapse) does not close claude.ai's
+    //      menu, and the fallback then pressed Enter INTO the open menu.
+    //   3. Nothing put keyboard focus back on the composer before that Enter.
+    // So the web arm now runs on the desktop arm's pieces: the shared catalog's
+    // click labels (MrClickLabelsFor), the "More models" hover, RouteAwaitSwitch
+    // (Select -> Invoke retry, "Switch model?" auto-confirm), RouteRefocusComposer
+    // (SetFocus, then a bounded click inside the composer) and exactly one Enter.
+    // What stays web-specific is only what a browser demands: the composer is
+    // read through the one door (CachedWebComposer / the element it returned at
+    // pre-flight -- never FocusedElement's TEXT), foreground / host / navigation
+    // are re-checked, another window of the same process is ANOTHER BROWSER
+    // WINDOW (never "restored" to the front), and Escape goes only into the
+    // pinned browser window while a model menu is verifiably showing.
+
+    // The submenu some tiers live behind. Same literal the desktop arm hovers.
+    const string ROUTE_MORE_MODELS_LABEL = "More models";
+
+    // ── Closing a model menu that is still showing ──────────────────────────
+    //
+    // Pure loop, harness-driven. Escape is pressed ONLY while the menu is seen
+    // open (one per level: a submenu, then the menu), ONLY while the pinned
+    // window is in front, and at most ROUTE_COLLAPSE_MAX_ESCAPES times. Closed
+    // false means the caller must NOT press Enter: it would land in the menu
+    // (activating its highlighted item), which is exactly the live defect.
+    class RouteCollapseIo
+    {
+        public Func<bool> MenuOpen;        // is a model menu (or its submenu) showing?
+        public Action CollapsePattern;     // ExpandCollapse.Collapse() on the picker
+        public Func<bool> WindowOk;        // is the pinned window still in front?
+        public Action SendEscape;
+        public Action<int> Sleep;
+    }
+
+    class RouteCollapseOutcome
+    {
+        public bool Closed;
+        public string Reason;              // null when Closed
+        public int Escapes;
+    }
+
+    const int ROUTE_COLLAPSE_MAX_ESCAPES = 3;
+
+    static RouteCollapseOutcome RouteCollapseMenu(RouteCollapseIo io)
+    {
+        var o = new RouteCollapseOutcome();
+        bool open = false;
+        try { open = io.MenuOpen(); } catch { open = false; }
+        if (!open) { o.Closed = true; return o; }
+        try { io.CollapsePattern(); } catch { }
+        io.Sleep(80);
+        for (;;)
+        {
+            try { open = io.MenuOpen(); } catch { open = false; }
+            if (!open) { o.Closed = true; return o; }
+            if (o.Escapes >= ROUTE_COLLAPSE_MAX_ESCAPES) { o.Reason = "menu_still_open"; return o; }
+            bool winOk = false;
+            try { winOk = io.WindowOk(); } catch { }
+            if (!winOk) { o.Reason = "focus_changed"; return o; }
+            o.Escapes++;
+            try { io.SendEscape(); } catch { }
+            io.Sleep(120);
+        }
+    }
+
+    // Is a model menu showing in this window? Its ITEMS -- elements of the
+    // surface's item control types whose Name starts (at the boundary) with any
+    // catalog click label, or the "More models" entry -- exist in the UIA tree
+    // only while it is open. Names are compared, never kept.
+    static bool WebMenuLooksOpen(AutomationElement win, WebPicker wp, List<string> itemLabels)
+    {
+        if (win == null || wp == null || string.IsNullOrEmpty(wp.ItemControlTypes)) return false;
+        try
+        {
+            var walker = TreeWalker.ControlViewWalker;
+            var stack = new Stack<KeyValuePair<AutomationElement, int>>();
+            stack.Push(new KeyValuePair<AutomationElement, int>(win, 0));
+            while (stack.Count > 0)
+            {
+                var cur = stack.Pop();
+                if (cur.Value > 30) continue;
+                AutomationElement el = cur.Key;
+                try
+                {
+                    if (MrItemTypeAllowed(el.Current.ControlType, wp.ItemControlTypes) && !el.Current.IsOffscreen)
+                    {
+                        string name = null;
+                        try { name = StripSelectedPrefix(el.Current.Name, wp.ItemSelectedPrefix); } catch { }
+                        if (!string.IsNullOrEmpty(name))
+                        {
+                            if (ModelItemNameMatches(name, ROUTE_MORE_MODELS_LABEL)) return true;
+                            if (itemLabels != null)
+                                foreach (string l in itemLabels)
+                                    if (!string.IsNullOrEmpty(l) && ModelItemNameMatches(name, l)) return true;
+                        }
+                    }
+                }
+                catch { }
+                try
+                {
+                    AutomationElement child = walker.GetFirstChild(el);
+                    while (child != null)
+                    {
+                        stack.Push(new KeyValuePair<AutomationElement, int>(child, cur.Value + 1));
+                        child = walker.GetNextSibling(child);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // The UIA hands of RouteCollapseMenu for a browser. Returns null when no
+    // model menu is showing any more, else the reason it could not be closed.
+    static string WebCollapseMenuUia(IntPtr pinnedHwnd, RouteCtx ctx)
+    {
+        if (ctx == null || ctx.Picker == null) return null;
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        if (win == null) return null;
+        List<string> labels = MrAllClickLabels("browser", ctx.Host);
+        WebPicker wp = ctx.Picker;
+        var io = new RouteCollapseIo();
+        io.MenuOpen = delegate { return WebMenuLooksOpen(win, wp, labels); };
+        io.CollapsePattern = delegate
+        {
+            AutomationElement p = FindWebPickerButton(win, wp);
+            if (p != null) TryCollapsePicker(p);
+        };
+        io.WindowOk = delegate { return GetForegroundWindow() == pinnedHwnd; };
+        // Into the pinned BROWSER window only -- never another window, not even
+        // another window of the same browser process.
+        io.SendEscape = delegate { if (GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE); };
+        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        RouteCollapseOutcome o = RouteCollapseMenu(io);
+        return o.Closed ? null : (o.Reason ?? "menu_still_open");
+    }
+
+    // The first catalog label that matches EXACTLY ONE item in the open menu.
+    // Ambiguity is a refusal (FindWebPickerItemUnique), never a first-match.
+    static AutomationElement WebFindTargetItem(AutomationElement win, WebPicker wp, List<string> labels, ref bool anyAmbiguous)
+    {
+        if (win == null || wp == null || labels == null) return null;
+        foreach (string lbl in labels)
+        {
+            if (string.IsNullOrEmpty(lbl)) continue;
+            int n;
+            AutomationElement el = FindWebPickerItemUnique(win, lbl, wp.ItemControlTypes, wp.ItemSelectedPrefix, out n);
+            if (el != null) return el;
+            if (n >= 2) anyAmbiguous = true;
+        }
+        return null;
+    }
+
+    // The desktop arm's "More models" step, for a browser. claude.ai (2026-10)
+    // shows only the current model, "Effort" and "More models" at the top level;
+    // Haiku and Opus are inside the submenu, which opens on POINTER HOVER (the
+    // accessibility Expand() alone does not render it -- confirmed on Claude
+    // Desktop, the same web app). So, exactly as RunRoute does: move the cursor
+    // over the item, Expand() too, wait, search again, put the cursor back. The
+    // cursor is moved only when that point belongs to the pinned browser window.
+    // A surface with no "More models" item (gemini) does nothing here.
+    static AutomationElement WebOpenMoreModelsAndFind(AutomationElement win, IntPtr pinnedHwnd, WebPicker wp, List<string> labels, ref bool anyAmbiguous, out bool opened)
+    {
+        opened = false;
+        if (win == null || wp == null) return null;
+        int n;
+        AutomationElement more = FindWebPickerItemUnique(win, ROUTE_MORE_MODELS_LABEL, wp.ItemControlTypes, wp.ItemSelectedPrefix, out n);
+        if (more == null) return null;
+        opened = true;
+        POINT savedPos;
+        bool hadPos = GetCursorPos(out savedPos);
+        try
+        {
+            System.Windows.Rect r = more.Current.BoundingRectangle;
+            if (!r.IsEmpty && r.Width > 0 && r.Height > 0)
+            {
+                POINT p;
+                p.X = (int)(r.Left + r.Width / 2);
+                p.Y = (int)(r.Top + r.Height / 2);
+                IntPtr at = WindowFromPoint(p);
+                if (at != IntPtr.Zero && GetAncestor(at, GA_ROOT_WINDOW) == pinnedHwnd) SetCursorPos(p.X, p.Y);
+            }
+        }
+        catch { }
+        object mmExpandObj;
+        try
+        {
+            if (more.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out mmExpandObj))
+            { try { ((ExpandCollapsePattern)mmExpandObj).Expand(); } catch { } }
+        }
+        catch { }
+        Thread.Sleep(200);
+        AutomationElement hit = WebFindTargetItem(win, wp, labels, ref anyAmbiguous);
+        if (hadPos) { try { SetCursorPos(savedPos.X, savedPos.Y); } catch { } }
+        return hit;
+    }
+
+    // Is keyboard focus on (or inside) the pinned composer? Compared by
+    // RuntimeId ONLY -- the focused element's TEXT is never read: in a browser
+    // that is whatever box has the caret (a password field, the omnibox). A
+    // focusable child of the composer (some editors focus an inner node) counts,
+    // up to four levels.
+    static bool WebFocusIsInComposer(int[] pinnedRid)
+    {
+        if (pinnedRid == null) return false;
+        try
+        {
+            AutomationElement f = AutomationElement.FocusedElement;
+            var walker = TreeWalker.ControlViewWalker;
+            for (int up = 0; up < 5 && f != null; up++)
+            {
+                int[] rid = null;
+                try { rid = f.GetRuntimeId(); } catch { }
+                if (rid != null && RuntimeIdEquals(rid, pinnedRid)) return true;
+                f = walker.GetParent(f);
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // The UIA hands of RouteRefocusComposer for a browser -- the SAME loop the
+    // desktop arm runs (SetFocus, then a click inside the composer, bounded,
+    // re-verified each step). Returns the composer (holding exactly the pinned
+    // prompt, with keyboard focus on it), or null with the reason. The composer
+    // is the element the one door returned (knownComposer), else the door again;
+    // its RuntimeId must still be the pinned one.
+    static AutomationElement WebRefocusUia(IntPtr pinnedHwnd, int[] pinnedRid, AutomationElement knownComposer, string originalText, out string reason)
+    {
+        AutomationElement cand = knownComposer;
+        var io = new RouteRefocusIo();
+        // A browser's other windows share its process: one of them in front is
+        // the user's choice, never something to pull back from.
+        io.WindowState = delegate { return GetForegroundWindow() == pinnedHwnd ? "same" : "other"; };
+        io.RestoreForeground = delegate { };
+        io.CandidateVerdict = delegate
+        {
+            AutomationElement c = cand;
+            int[] rid = null; string t = null; bool readable = false;
+            if (c != null) { try { rid = c.GetRuntimeId(); t = ReadText(c); readable = true; } catch { readable = false; } }
+            if (!readable || !RuntimeIdEquals(rid, pinnedRid))
+            {
+                AutomationElement door = CachedWebComposer();
+                readable = false;
+                if (door != null) { try { rid = door.GetRuntimeId(); t = ReadText(door); readable = true; } catch { } }
+                if (!readable || !RuntimeIdEquals(rid, pinnedRid)) return "no_element";
+                c = door;
+            }
+            cand = c;
+            return NormalizeWs(t) == NormalizeWs(originalText) ? null : "text_changed";
+        };
+        io.FocusVerdict = delegate
+        {
+            if (!WebFocusIsInComposer(pinnedRid)) return "focus_not_in_composer";
+            string t = null;
+            try { t = ReadText(cand); } catch { return "no_element"; }
+            return NormalizeWs(t) == NormalizeWs(originalText) ? null : "text_changed";
+        };
+        io.FocusCandidate = delegate { try { cand.SetFocus(); return true; } catch { return false; } };
+        io.ClickCandidate = delegate { return RouteClickInto(cand, pinnedHwnd); };
+        io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+        io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+        RouteRefocusOutcome o = RouteRefocusComposer(io);
+        reason = o.Ok ? null : (o.Reason ?? "no_element");
+        return o.Ok ? cand : null;
+    }
+
     // ════ AI-216: THE WEB ROUTE ═════════════════════════════════════════════
     //
     // A SEPARATE function from RunRoute rather than branches threaded through
@@ -8793,10 +9123,17 @@ public static class CfaiEnforcer
     //                  select_failed, switch_not_verified, modifiers_stuck,
     //                  model_changed, from_tier_not_confirmed, no_expand_pattern,
     //                  expand_failed, interrupted_after_expand,
-    //                  interrupted_before_select
+    //                  interrupted_before_select, confirm_dialog_not_confirmed,
+    //                  already_on_target. Before the one Enter the model menu is
+    //                  closed (WebCollapseMenuUia) and focus put back on the
+    //                  composer (WebRefocusUia); when either cannot be done the
+    //                  result is failed <reason>_no_fallback_<why> and NO Enter.
     //   failed         nothing was sent, and the text is still in the composer.
     //                  reasons: focus_changed, navigated, host_changed,
-    //                  composer_lost, not_submitted, expired, exception
+    //                  composer_lost, not_submitted, expired, exception,
+    //                  focus_lost_after_switch_<why> (switched, then the menu
+    //                  would not close or focus would not return -- the desktop
+    //                  arm's reason, same vocabulary)
     //   ok + restored  the switch emptied the composer, the prompt was retyped,
     //                  read back exactly, and sent.
     //   restored_not_sent  the retype did not read back exactly. Stopped. The
@@ -8807,6 +9144,7 @@ public static class CfaiEnforcer
     {
         string effortFrom = (ctx != null ? ctx.EffortFrom : "") ?? "";
         RouteMeta meta = _activeRouteMeta;
+        AutomationElement composerEl = null;
         try
         {
             if (ctx == null || ctx.Picker == null)
@@ -8828,7 +9166,7 @@ public static class CfaiEnforcer
             // THE ONE DOOR. Never AutomationElement.FocusedElement -- on a
             // browser that is whatever text box has the caret, which is the
             // whole defect this ticket's design note is about.
-            AutomationElement composerEl = CachedWebComposer();
+            composerEl = CachedWebComposer();
             if (composerEl == null)
             { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "composer_lost"); return; }
             int[] curRid = null;
@@ -8851,96 +9189,88 @@ public static class CfaiEnforcer
             while (Down(VK_CONTROL) || Down(VK_MENU) || Down(VK_SHIFT) || Down(VK_RETURN))
             {
                 if ((DateTime.UtcNow.Ticks - waitStart) > TimeSpan.FromMilliseconds(2500).Ticks)
-                { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "modifiers_stuck"); return; }
+                { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "modifiers_stuck", composerEl); return; }
                 Thread.Sleep(20);
             }
 
             AutomationElement win = null;
             try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
             if (win == null)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found", composerEl); return; }
 
             AutomationElement picker = VerifiedWebPicker(pinnedHwnd, ctx.Host, ctx.Picker);
             if (picker == null)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_not_found", composerEl); return; }
             string labelBefore = null;
             try { labelBefore = picker.Current.Name; } catch { }
             if (string.IsNullOrEmpty(labelBefore))
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_unreadable"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "picker_unreadable", composerEl); return; }
             // Re-read the effort from the FRESH label rather than trusting the
             // pin's copy, so effort_from describes the moment the switch was
             // actually attempted.
             effortFrom = ModelEffortFromLabel(labelBefore, ctx.Picker.NamePrefix);
-            // TIER-ONLY, and that is the point of doing it through
-            // DetectModelInfo rather than a string compare: the label also
-            // carries an effort token, and an effort change on its own must
-            // never read as a model change.
-            // The shared catalog reads the tier (MrTierOfLabel); the surface's
-            // own button table is the fallback. The keyword chain alone read
-            // Gemini's 'currently Flash' as economy and refused every route
-            // from the standard tier as model_changed.
-            string checkTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelBefore) : null;
-            if (checkTier == null) { int bt = ResolveButtonTier(labelBefore, ctx.Picker); if (bt > 0) checkTier = MrTierName(bt); }
+            // TIER-ONLY, through the SHARED CATALOG (MrTierOfLabel) exactly as
+            // the desktop arm reads it ('Model: Sonnet 5.5 Medium' -> standard);
+            // the surface's own button table is the fallback (gemini's
+            // 'currently Flash'). An effort change on its own must never read as
+            // a model change.
+            string checkTier = WebTierOfLabel(meta, ctx, labelBefore);
             if (checkTier == null || checkTier != fromTier)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "model_changed"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "model_changed", composerEl); return; }
+            // ALREADY THERE: never open the picker for a no-op (the desktop
+            // arm's belt to the pin's braces).
+            if (string.Equals(checkTier, toTier, StringComparison.Ordinal))
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "already_on_target", composerEl); return; }
+            string surfaceHost = meta != null ? meta.HostOrApp : (ctx.Host ?? "");
 
             object expandObj;
             if (!picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out expandObj))
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "no_expand_pattern"); return; }
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "no_expand_pattern", composerEl); return; }
             try { ((ExpandCollapsePattern)expandObj).Expand(); }
-            catch { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "expand_failed"); return; }
+            catch { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "expand_failed", composerEl); return; }
 
+            // From here on the menu may be open. EVERY failure below goes
+            // through WebFallbackSendOrReport, which closes it (Escape into
+            // this browser window while it is still showing) BEFORE putting
+            // focus back on the composer and pressing Enter exactly once.
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_after_expand"); return; }
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_after_expand", composerEl); return; }
 
             Thread.Sleep(150);   // let the popover render its items
 
             // ── PRE-SWITCH CONFIRMATION of the pinned from_tier ─────────────
             //
-            // The button label already said which tier is current, but that is
-            // ONE reading of ONE string. SelectionItemPattern.IsSelected is a
-            // SECOND, INDEPENDENT signal from a different element, and the pin
-            // is 15s old by the time it is consumed. Requiring both is what
-            // stops a route acting on a stale picture of the world.
-            //
-            // Skipped only when this surface lists no label for the current
-            // tier -- there is then nothing to look for, and the button label
-            // stands alone. Any other failure to confirm sends unrouted: the
-            // prompt still goes, just with whatever model is selected.
-            string fromLabel = WebPickerTierLabel(ctx.Picker, MrTierNum(fromTier));
-            if (!string.IsNullOrEmpty(fromLabel))
-            {
-                int fromCount;
-                AutomationElement fromItem = FindWebPickerItemUnique(win, fromLabel, ctx.Picker.ItemControlTypes, ctx.Picker.ItemSelectedPrefix, out fromCount);
-                // Fail ONLY on positive evidence of a mismatch. WEB_SEL_UNKNOWN
-                // means this surface exposes no SelectionItemPattern (Gemini),
-                // and refusing there would abort every route on it.
-                if (fromItem == null || WebItemSelectionState(fromItem) == WEB_SEL_NO)
-                { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "from_tier_not_confirmed"); return; }
-            }
+            // A second, independent signal (SelectionItemPattern.IsSelected on
+            // the current model's ITEM), found by the shared catalog's click
+            // labels for the from tier -- ["Sonnet 5.5", "Sonnet 5", "Sonnet"] --
+            // not the surface table's one 2026-09-22 name. The route refuses
+            // ONLY on positive evidence of a mismatch: the item is there and
+            // says it is NOT selected. Not finding it is no evidence (claude.ai
+            // keeps Haiku/Opus inside "More models", so a user ON Haiku has no
+            // top-level item to confirm), and neither is a surface with no
+            // SelectionItemPattern (gemini). The button label read above
+            // through the catalog then stands alone -- exactly what the desktop
+            // arm has always relied on.
+            List<string> fromLabels = MrClickLabelsFor("browser", surfaceHost, fromTier);
+            bool fromAmbiguous = false;
+            AutomationElement fromItem = WebFindTargetItem(win, ctx.Picker, fromLabels, ref fromAmbiguous);
+            if (fromItem != null && WebItemSelectionState(fromItem) == WEB_SEL_NO)
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "from_tier_not_confirmed", composerEl); return; }
 
             // ── THE TARGET ITEM: exactly one, or nothing ───────────────────
             //
-            // NO "More models" SUBMENU HUNT on a web surface. The desktop path
-            // has one, and it works by MOVING THE USER'S MOUSE CURSOR over a
-            // hover flyout -- a technique that was probed against Claude
-            // Desktop and has not been probed here. All three measured
-            // claude.ai tiers are top-level items, so nothing needs it; if a
-            // future surface hides a tier behind a submenu, that tier simply
-            // reports target_item_not_found and the prompt sends unrouted.
-            // The catalog's labels, most specific first. Each one must still
-            // match EXACTLY ONE item; the first label that does is clicked.
-            int matchCount = 0;
-            bool anyAmbiguous = false;
-            AutomationElement targetItem = null;
+            // The catalog's labels (+ policy overrides / a rule's ui_name), most
+            // specific first; each must match EXACTLY ONE item, and the first
+            // that does is clicked. Not at the top level -> the desktop arm's
+            // "More models" hover (WebOpenMoreModelsAndFind), then search again.
             List<string> labels = (meta != null && meta.ClickLabels != null && meta.ClickLabels.Count > 0)
                 ? meta.ClickLabels : new List<string> { toLabel };
-            foreach (string lbl in labels)
+            bool anyAmbiguous = false;
+            AutomationElement targetItem = WebFindTargetItem(win, ctx.Picker, labels, ref anyAmbiguous);
+            if (targetItem == null)
             {
-                if (string.IsNullOrEmpty(lbl)) continue;
-                targetItem = FindWebPickerItemUnique(win, lbl, ctx.Picker.ItemControlTypes, ctx.Picker.ItemSelectedPrefix, out matchCount);
-                if (targetItem != null) break;
-                if (matchCount >= 2) anyAmbiguous = true;
+                bool openedMore;
+                targetItem = WebOpenMoreModelsAndFind(win, pinnedHwnd, ctx.Picker, labels, ref anyAmbiguous, out openedMore);
             }
             if (targetItem == null)
             {
@@ -8951,74 +9281,123 @@ public static class CfaiEnforcer
                 // available to break the tie and the cost of guessing wrong is
                 // that the user is served and billed by a model nobody chose.
                 string why = anyAmbiguous ? "target_item_ambiguous" : "target_item_not_found";
-                WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, why);
+                WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, why, composerEl);
                 return;
             }
 
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_before_select"); return; }
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_before_select", composerEl); return; }
 
+            // Recorded BEFORE the click, so the picker change it causes is known
+            // to be ours and never counted as the user's own choice.
             if (meta != null) MrNoteOurSwitch(meta.ChoiceKey, toTier);
-            bool selected = false;
+            // ACTIVATION, as the desktop arm does it: Select() first, then (if
+            // the picker has not switched shortly after) Invoke() on the same
+            // item inside RouteAwaitSwitch. The menu is NOT collapsed until the
+            // wait is over -- collapsing right after a Select() that only
+            // highlighted closes the menu having chosen nothing.
+            bool usedSelect = false, usedInvoke = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
-            { try { ((SelectionItemPattern)selObj).Select(); selected = true; } catch { } }
-            if (!selected && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
-            { try { ((InvokePattern)selObj).Invoke(); selected = true; } catch { } }
-            if (!selected)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "select_failed"); return; }
+            { try { ((SelectionItemPattern)selObj).Select(); usedSelect = true; } catch { } }
+            if (!usedSelect && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
+            { try { ((InvokePattern)selObj).Invoke(); usedInvoke = true; } catch { } }
+            if (!usedSelect && !usedInvoke)
+            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "select_failed", composerEl); return; }
 
             Thread.Sleep(300);
-            TryCollapsePicker(picker);   // best-effort — selecting usually closes it on its own
 
             // Re-find the button FRESH rather than trusting the cached
-            // reference: a stale reference can keep returning its last-known
-            // (pre-switch) value without ever throwing, which would make
-            // verification wait out its whole deadline for a switch that
-            // already happened. Same reasoning as the desktop path's.
+            // reference, and keep re-finding DURING the wait: a stale reference
+            // keeps returning its pre-switch value without ever throwing.
             AutomationElement verifyEl = FindWebPickerButton(win, ctx.Picker) ?? picker;
-            // Keep the POLL thread's cache current too, so the next tick of
-            // UpdateModelRouting is not re-verifying something stale.
             if (verifyEl != null) { _webPickerCached = verifyEl; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
+            long nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
 
-            // ── VERIFICATION: tier-from-label OR IsSelected ────────────────
-            //
-            // TWO independent confirmations, OR'd, and BOTH are tier-only.
-            //
-            // The label comparison is deliberately NOT `labelAfter != labelBefore`
-            // the way the desktop path's is. On this surface the label carries
-            // an EFFORT token that changes as a side effect of the switch, so a
-            // plain string inequality would report "switched" for an effort
-            // change with the same model. Comparing the DETECTED TIER to the
-            // target is the only comparison that means what it says.
-            string labelAfter = null;
-            string effortTo = "";
-            bool switched = false;
-            long verifyDeadline = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(1500).Ticks;
-            do
+            // ── THE SWITCH WAIT: the desktop arm's RouteAwaitSwitch ─────────
+            // Same loop, same bounds, same "Switch model?" auto-confirm (the
+            // catalog's hosts["claude.ai"].confirm_dialog; a host without one is
+            // never probed). Its web hands differ only where a browser demands:
+            // the probe walks THIS browser window only (another window of the
+            // same process is another browser window, not a modal), and Escape
+            // goes only into this window.
+            RouteConfirmCfg confirmCfg = MrConfirmDialogCfg("browser", surfaceHost);
+            var confirmButtons = new Dictionary<string, AutomationElement>(StringComparer.OrdinalIgnoreCase);
+            AutomationElement confirmAnchor = null;
+            var io = new RouteSwitchIo();
+            io.ReadLabel = delegate
             {
-                try { labelAfter = verifyEl.Current.Name; } catch { }
-                if (!string.IsNullOrEmpty(labelAfter))
+                string l = null;
+                try { l = verifyEl != null ? verifyEl.Current.Name : null; } catch { }
+                if (DateTime.UtcNow.Ticks >= nextRefind || string.IsNullOrEmpty(l))
                 {
-                    string afterTier = meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, labelAfter) : null;
-                    if (afterTier == null) { int bt = ResolveButtonTier(labelAfter, ctx.Picker); if (bt > 0) afterTier = MrTierName(bt); }
-                    if (afterTier != null && string.Equals(afterTier, toTier, StringComparison.Ordinal)) { switched = true; break; }
+                    AutomationElement fresh = FindWebPickerButton(win, ctx.Picker);
+                    if (fresh != null) { verifyEl = fresh; _webPickerCached = fresh; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
+                    nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
                 }
-                if (WebItemIsSelected(targetItem)) { switched = true; break; }
-                Thread.Sleep(60);
-            } while (DateTime.UtcNow.Ticks < verifyDeadline);
-            if (!switched)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "switch_not_verified"); return; }
+                return l;
+            };
+            // TIER-ONLY, never "the label changed": on this surface the label
+            // carries an effort token that changes as a side effect. A label the
+            // catalog cannot read falls to the item's own IsSelected (claude.ai);
+            // with neither, "" -- never null, so RouteSwitchVerified cannot fall
+            // back to a plain string inequality here.
+            io.TierOf = delegate(string l)
+            {
+                string t = WebTierOfLabel(meta, ctx, l);
+                if (t != null) return t;
+                return WebItemIsSelected(targetItem) ? toTier : "";
+            };
+            io.RetryActivate = delegate
+            {
+                object invObj;
+                try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
+            };
+            io.ProbeConfirm = delegate
+            {
+                confirmButtons.Clear();
+                confirmAnchor = null;
+                return RouteProbeConfirmUia(win, confirmCfg, confirmButtons, ref confirmAnchor);
+            };
+            io.InvokeConfirm = delegate(string name)
+            {
+                AutomationElement b;
+                return confirmButtons.TryGetValue(name, out b) && RouteInvokeElement(b);
+            };
+            io.DismissConfirm = delegate
+            {
+                AutomationElement cancel = RouteFindDialogCancel(confirmAnchor, confirmCfg != null ? confirmCfg.CancelName : null);
+                if (!RouteInvokeElement(cancel))
+                {
+                    // Escape only into THIS browser window -- never another one.
+                    if (GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE);
+                }
+                Thread.Sleep(200);
+            };
+            io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+            io.Sleep = delegate(int ms) { Thread.Sleep(ms); };
+
+            RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
+            string labelAfter = waited.LabelAfter;
+            TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
+            if (!waited.Switched)
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, waited.Reason ?? "switch_not_verified", composerEl); return; }
             // Captured AFTER the switch, from the same string the tier came
             // from. "" when the label carried no recognised token.
-            effortTo = ModelEffortFromLabel(labelAfter, ctx.Picker.NamePrefix);
+            string effortTo = ModelEffortFromLabel(labelAfter, ctx.Picker.NamePrefix);
             if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
 
-            // The dropdown interaction moves keyboard focus into the popover and
-            // does not necessarily return it. Ask UIA to put it back on the SAME
-            // element that was pinned.
-            try { composerEl.SetFocus(); } catch { }
-            Thread.Sleep(150);
+            // ── The switch landed. Never leave a menu showing: a submenu or the
+            // menu itself still open would take the Enter. ─────────────────
+            string menuWhy = WebCollapseMenuUia(pinnedHwnd, ctx);
+            if (menuWhy != null)
+            {
+                // The switch DID happen, so this is not an unrouted send; with
+                // the menu still up no Enter goes anywhere. The prompt stays
+                // visibly in the composer.
+                WebRouteFailed(provider, toTier /* now-current */, toTier, toLabel, complexity, effortFrom, effortTo, "focus_lost_after_switch_" + menuWhy);
+                return;
+            }
 
             if (GetForegroundWindow() != pinnedHwnd)
             { WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, effortTo, "focus_changed"); return; }
@@ -9045,8 +9424,18 @@ public static class CfaiEnforcer
 
             if (NormalizeWs(afterText) == NormalizeWs(originalText))
             {
-                // The prompt survived, which is the measured behaviour. Send it.
-                WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, composerEl, originalText, effortFrom, effortTo, null);
+                // The prompt survived, which is the measured behaviour. Put
+                // keyboard focus BACK on the composer -- the desktop arm's
+                // bounded SetFocus-then-click loop, verified each step -- and
+                // only then send, exactly once.
+                string afterWhy;
+                AutomationElement focused = WebRefocusUia(pinnedHwnd, pinnedComposerRid, composerEl, originalText, out afterWhy);
+                if (focused == null)
+                {
+                    WebRouteFailed(provider, toTier /* now-current */, toTier, toLabel, complexity, effortFrom, effortTo, "focus_lost_after_switch_" + afterWhy);
+                    return;
+                }
+                WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, focused, originalText, effortFrom, effortTo, null);
                 return;
             }
 
@@ -9068,14 +9457,19 @@ public static class CfaiEnforcer
             // for line breaks rather than typing a '\\n' a page may treat as
             // send -- then READ IT BACK and only send on an EXACT match.
             //
-            // No Ctrl+A/Delete first: the composer already read as empty, and
-            // clearing something we believe is empty can only ever destroy
-            // something we were wrong about.
+            // Keystrokes go to whatever has keyboard focus, so it is put on the
+            // composer first (SetFocus, then one click inside it if focus did
+            // not move), and the retype does not start unless it is there.
             //
             // UpdateModelRouting refused to ARM at all for a prompt that does
             // not fit the write budget, so reaching here means the retype was
             // always affordable -- "we never swallow an Enter for a prompt we
             // could not put back."
+            try { composerEl.SetFocus(); } catch { }
+            Thread.Sleep(150);
+            if (!WebFocusIsInComposer(pinnedComposerRid)) { RouteClickInto(composerEl, pinnedHwnd); Thread.Sleep(120); }
+            if (!WebFocusIsInComposer(pinnedComposerRid))
+            { WebRouteFailed(provider, toTier /* now-current */, toTier, toLabel, complexity, effortFrom, effortTo, "focus_lost_after_switch_focus_not_in_composer"); return; }
             if (!WebRestoreComposer(composerEl, originalText, pinnedHwnd, ctx))
             {
                 // The retype did not read back exactly. STOP. Whatever is in the
@@ -9095,7 +9489,9 @@ public static class CfaiEnforcer
             // desktop path's. An exception means this code does not know what
             // state the page is in, and a synthetic Enter into an unknown state
             // is how a prompt lands in the wrong conversation. The text stays in
-            // the composer; the user presses Enter again.
+            // the composer; the user presses Enter again. A model menu we may
+            // have opened is still closed first.
+            try { WebCollapseMenuUia(pinnedHwnd, ctx); } catch { }
             WebRouteFailed(provider, fromTier, toTier, toLabel, complexity, effortFrom, "", "exception");
         }
         finally
@@ -9103,6 +9499,18 @@ public static class CfaiEnforcer
             _activeRouteMeta = null;
             _routeInProgress = false;
         }
+    }
+
+    // The tier a web picker label shows: the shared catalog first (what the
+    // desktop arm and the extension read), the surface's own button table as
+    // the fallback (gemini's 'currently Flash'). null when neither reads it.
+    static string WebTierOfLabel(RouteMeta meta, RouteCtx ctx, string label)
+    {
+        if (string.IsNullOrEmpty(label)) return null;
+        string host = meta != null ? meta.HostOrApp : (ctx != null ? ctx.Host : null);
+        string t = MrTierOfLabel(meta != null ? meta.Surface : "browser", host ?? "", label);
+        if (t == null && ctx != null) { int bt = ResolveButtonTier(label, ctx.Picker); if (bt > 0) t = MrTierName(bt); }
+        return t;
     }
 
     // Nothing was sent and nothing will be. Clears the pin so a held Enter
@@ -9125,7 +9533,7 @@ public static class CfaiEnforcer
     // happened. Only a genuine change of focus, host, page instance or content
     // declines.
     static void WebFallbackSendOrReport(RouteCtx ctx, string provider, string fromTier, string toTier, string toLabel, string complexity,
-        IntPtr pinnedHwnd, int[] pinnedComposerRid, string originalText, string effortFrom, string reason)
+        IntPtr pinnedHwnd, int[] pinnedComposerRid, string originalText, string effortFrom, string reason, AutomationElement knownComposer)
     {
         // Cleared unconditionally and FIRST, whether or not the send below
         // works: one attempt per Enter, always.
@@ -9138,15 +9546,36 @@ public static class CfaiEnforcer
         if (ctx != null && !string.Equals(_fgWebHost ?? "", ctx.Host ?? "", StringComparison.Ordinal))
         { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_host_changed", effortFrom); return; }
 
-        // THE ONE DOOR again -- never FocusedElement.
-        AutomationElement el = CachedWebComposer();
-        if (el == null)
+        // NEVER LEAVE THE MENU OPEN, AND NEVER PRESS ENTER INTO IT. Live
+        // (1307630, claude.ai): ExpandCollapse.Collapse() left the model menu
+        // showing, the Enter below landed in it, and the prompt sat unsent
+        // (from_tier_not_confirmed_fallback_not_submitted). A menu that cannot
+        // be closed means no Enter at all.
+        string menuWhy = WebCollapseMenuUia(pinnedHwnd, ctx);
+        if (menuWhy != null)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + menuWhy, effortFrom); return; }
+
+        // THE ONE DOOR again -- never FocusedElement. The element it returned
+        // at pre-flight, else the door now; WebRefocusUia insists on the pinned
+        // RuntimeId and on exactly the pinned prompt.
+        AutomationElement door = CachedWebComposer();
+        AutomationElement known = knownComposer ?? door;
+        if (known == null)
         { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_no_element", effortFrom); return; }
-        int[] rid = null; string text = null;
-        try { rid = el.GetRuntimeId(); } catch { }
-        try { text = ReadText(el); } catch { }
-        if (!RuntimeIdEquals(rid, pinnedComposerRid) || NormalizeWs(text) != NormalizeWs(originalText))
-        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_text_changed", effortFrom); return; }
+
+        // Keyboard focus back on the composer -- the desktop arm's bounded
+        // SetFocus-then-click loop -- before the one Enter. It refuses on its
+        // own when another window took the foreground (focus_changed) or the
+        // user edited the text (text_changed).
+        string whyNot;
+        AutomationElement el = WebRefocusUia(pinnedHwnd, pinnedComposerRid, known, originalText, out whyNot);
+        if (el == null)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_" + whyNot, effortFrom); return; }
+        // The refocus took time: the window and page checks again, immediately before Enter.
+        if (GetForegroundWindow() != pinnedHwnd)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_focus_changed", effortFrom); return; }
+        if (ctx != null && _browserNavGen != ctx.NavGen)
+        { EmitRoute(_app, provider, fromTier, toTier, toLabel, complexity, "failed", -1, reason + "_no_fallback_navigated", effortFrom); return; }
 
         Emit("prompt", _app, "", "send", originalText.Length);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
@@ -10501,6 +10930,11 @@ public static class CfaiEnforcer
     // per host. One claude.ai account shows Fable 5.1 and another does not; a
     // ChatGPT Go account has no picker at all. A tier with no label simply does
     // not arm a route.
+    //
+    // NOT on the route path any more: RunWebRoute reads EVERY catalog click
+    // label for a tier (MrClickLabelsFor) -- the same labels the desktop arm
+    // and the extension use. This one flattened label per tier is what the
+    // payload carries (ai-processes.js catalogTierLabels, itself catalog-derived).
     static string WebPickerTierLabel(WebPicker p, int tierNum)
     {
         if (p == null) return "";

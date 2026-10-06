@@ -162,27 +162,38 @@ test('catalog: every click label reads back as its own tier (no label points at 
   }
 });
 
-test('Gemini labels match the live-measured menu (ai-processes.js gemini_web modelPicker)', () => {
-  const src = readFileSync(path.join(root, 'agent', 'src', 'os_monitor', 'ai-processes.js'), 'utf8');
-  const m = /tierLabels:\s*\{\s*3:\s*'([^']+)',\s*2:\s*'([^']+)',\s*1:\s*'([^']+)'\s*\}[\s\S]{0,900}?provider: 'google'/.exec(src);
-  assert.ok(m, 'gemini modelPicker tierLabels not found in ai-processes.js');
+// The desktop agent's web arm used to carry its OWN hand-copied click labels
+// (ai-processes.js modelPicker.tierLabels). claude.ai's went stale ('Sonnet 5'
+// vs the live 'Sonnet 5.5') and every browser route the agent drove failed
+// from_tier_not_confirmed (live 2026-10-06). They are now DERIVED from this
+// catalog, so the agent's web arm, the desktop arm and this extension click the
+// same strings.
+const aiProcs = await import(pathToFileURL(path.join(root, 'agent', 'src', 'os_monitor', 'ai-processes.js')).href);
+function agentTierLabels(id) {
+  const s = aiProcs.WEB_SURFACES.find((x) => x.id === id);
+  assert.ok(s && s.modelPicker && s.modelPicker.tierLabels, id + ' modelPicker tierLabels not found in ai-processes.js');
+  return s.modelPicker.tierLabels;
+}
+
+test('Gemini labels: the agent web arm clicks the catalog labels (ai-processes.js gemini_web modelPicker)', () => {
+  const m = agentTierLabels('gemini_web');
   const g = catalog.hosts['gemini.google.com'].tiers;
-  assert.equal(g.premium.click_labels[0], m[1]);
+  assert.equal(g.premium.click_labels[0], m[3]);
   assert.equal(g.standard.click_labels[0], m[2]);
-  assert.equal(g.economy.click_labels[0], m[3]);
+  assert.equal(g.economy.click_labels[0], m[1]);
+  // The live-measured 2026-09-22 menu strings, unchanged.
+  assert.deepEqual({ ...m }, { 3: '3.1 Pro', 2: '3.8 Flash', 1: '3.5 Flash-Lite' });
 });
 
-test('claude.ai labels match the live-measured menu (ai-processes.js claude_web modelPicker)', () => {
-  const src = readFileSync(path.join(root, 'agent', 'src', 'os_monitor', 'ai-processes.js'), 'utf8');
-  const m = /tierLabels:\s*\{\s*3:\s*'([^']+)',\s*2:\s*'([^']+)',\s*1:\s*'([^']+)'\s*\}[\s\S]{0,1500}?provider: 'anthropic'/.exec(src);
-  assert.ok(m, 'claude modelPicker tierLabels not found in ai-processes.js');
+test('claude.ai labels: the agent web arm clicks the catalog labels (ai-processes.js claude_web modelPicker)', () => {
+  const m = agentTierLabels('claude_web');
   const c = catalog.hosts['claude.ai'].tiers;
-  // 2026-10-05: Claude now labels Opus/Sonnet "5.5", and the catalog leads with
-  // those names. The 2026-09-22 measured names (ai-processes.js tierLabels) must
-  // still be in the list as fallbacks, so the two sources never disagree.
-  assert.ok(c.premium.click_labels.includes(m[1]), `catalog premium lacks ${m[1]}`);
-  assert.ok(c.standard.click_labels.includes(m[2]), `catalog standard lacks ${m[2]}`);
-  assert.equal(c.economy.click_labels[0], m[3]);
+  assert.equal(c.premium.click_labels[0], m[3]);
+  assert.equal(c.standard.click_labels[0], m[2]);
+  assert.equal(c.economy.click_labels[0], m[1]);
   assert.equal(c.premium.click_labels[0], 'Opus 5.5');
   assert.equal(c.standard.click_labels[0], 'Sonnet 5.5');
+  // The 2026-09-22 names stay in the catalog as fallbacks.
+  assert.ok(c.premium.click_labels.includes('Opus 5'));
+  assert.ok(c.standard.click_labels.includes('Sonnet 5'));
 });

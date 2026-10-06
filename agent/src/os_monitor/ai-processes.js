@@ -1,3 +1,5 @@
+import { MODEL_CATALOG } from './model-catalog.generated.js';
+
 // Catalog of process names we treat as AI surfaces. When one of these is the
 // foreground window AND the clipboard changes (or a file is opened), we capture
 // the event. This is the universal layer — works for every install method
@@ -970,6 +972,22 @@ export function stripSelectedPrefix(name, selectedPrefix) {
   if (p.length === 0 || n.length <= p.length) return n;
   if (n.slice(0, p.length).toLowerCase() !== p.toLowerCase()) return n;
   return n.slice(p.length);
+}
+
+// The menu labels a web surface's model picker CLICKS, per tier, read from the
+// SHARED catalog (shared/model-catalog.json -> model-catalog.generated.js) --
+// the same source the desktop enforcer's decideRoute port and the browser
+// extension use. Hand-copied labels here went stale: claude.ai's 2026-09-22
+// 'Sonnet 5' could not match the live 'Sonnet 5.5' item at the boundary, and
+// the desktop agent's web arm failed every claude.ai route with
+// from_tier_not_confirmed (live 2026-10-06, agent 1307630). The enforcer now
+// reads every catalog label itself (MrClickLabelsFor); this flattened copy is
+// the first (most specific) label of each tier, kept for the payload shape.
+export function catalogTierLabels(host) {
+  const entry = (MODEL_CATALOG.hosts || {})[host] || {};
+  const tiers = entry.tiers || {};
+  const first = (t) => String((tiers[t] && Array.isArray(tiers[t].click_labels) && tiers[t].click_labels[0]) || '');
+  return { 3: first('premium'), 2: first('standard'), 1: first('economy') };
 }
 
 // AI-216 / Gemini. Resolve the CURRENT tier from the picker BUTTON's label.
@@ -3522,8 +3540,10 @@ export const WEB_SURFACES = [
       // see modelItemNameMatches for why a bare prefix test is not enough.
       // 'Haiku 4.5' carries its minor version because that is what the item
       // reads; the boundary rule then keeps 'Haiku 4.5' from matching a future
-      // 'Haiku 4.55'.
-      tierLabels: { 3: 'Opus 5', 2: 'Sonnet 5', 1: 'Haiku 4.5' },
+      // 'Haiku 4.55'. FROM THE SHARED CATALOG (catalogTierLabels): Claude now
+      // labels Opus/Sonnet '5.5', and the hand-copied 'Sonnet 5' could not match
+      // 'Sonnet 5.5 ...' -- every web-arm route failed from_tier_not_confirmed.
+      tierLabels: catalogTierLabels('claude.ai'),
       // The provider whose tier arithmetic applies. Stated as DATA rather than
       // inferred from the product string: the router's ceiling logic is keyed
       // on provider, and a host serving another vendor's models one day must
@@ -3599,7 +3619,7 @@ export const WEB_SURFACES = [
       itemSelectedPrefix: 'Selected ',
       // What we CLICK: the menu's own strings, carrying their version numbers
       // because that is what the items read.
-      tierLabels: { 3: '3.1 Pro', 2: '3.8 Flash', 1: '3.5 Flash-Lite' },
+      tierLabels: catalogTierLabels('gemini.google.com'),
       // What we READ off the button. NOT the same strings, and NOT derivable
       // from the keyword chain: model-router-config's google rules put
       // ['flash','lite'] -> economy AHEAD of ['pro'] -> premium, which collapses

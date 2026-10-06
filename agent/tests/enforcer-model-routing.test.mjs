@@ -340,7 +340,10 @@ test('AI-216: the tier labels come from the catalog, versioned', {
 }, async () => {
   const rows = await runHarness();
   const byTier = Object.fromEntries(rows.filter((r) => r.t === 'tierlabel').map((r) => [r.tier, r.label]));
-  assert.deepEqual(byTier, { 3: 'Opus 5', 2: 'Sonnet 5', 1: 'Haiku 4.5' });
+  // The payload's flattened labels are the shared catalog's first click label
+  // per tier (ai-processes.js catalogTierLabels). The route itself reads every
+  // catalog label (MrClickLabelsFor), not these.
+  assert.deepEqual(byTier, { 3: 'Opus 5.5', 2: 'Sonnet 5.5', 1: 'Haiku 4.5' });
 });
 
 // ══ THE PIN-SURVIVAL BUG ═══════════════════════════════════════════════════

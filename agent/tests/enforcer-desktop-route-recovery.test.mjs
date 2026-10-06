@@ -312,7 +312,7 @@ test('catalog: Claude click labels lead with the 5.5 names, keep the old names a
   for (const [k, v] of Object.entries(cat.apps)) if (k !== 'claude_desktop') assert.equal(v.confirm_dialog, undefined, k);
 });
 
-test('desktop route: the confirm signature comes from the catalog, for claude_desktop only', winOnly, async () => {
+test('desktop route: the confirm signature comes from the catalog, for the surfaces that declare one', winOnly, async () => {
   const rows = await runHarness();
   present(rows, 'RouteAwaitSwitch');
   const c = rows.find((r) => r.t === 'cfg' && r.app === 'claude_desktop');
@@ -321,8 +321,200 @@ test('desktop route: the confirm signature comes from the catalog, for claude_de
   assert.equal(c.title, 'Switch model');
   assert.equal(c.cancel, 'Cancel');
   assert.equal(rows.find((r) => r.t === 'cfg' && r.app === 'chatgpt_desktop').present, false);
-  assert.equal(rows.find((r) => r.t === 'cfg' && r.app === 'browser_claude_ai').present, false,
-    'the desktop enforcer never runs the probe on a browser surface (the extension owns claude.ai)');
+  // Changed 2026-10-06: the enforcer's WEB arm (claude.ai in a browser with no
+  // extension) runs the same RouteAwaitSwitch, so it reads claude.ai's own
+  // catalog confirm_dialog. Where the extension is installed it owns routing
+  // and this arm stands down (routing-ownership.js), as before.
+  assert.equal(rows.find((r) => r.t === 'cfg' && r.app === 'browser_claude_ai').present, true,
+    'claude.ai shows the same "Switch model?" modal as Claude Desktop; the web arm confirms it too');
+});
+
+// ── 8. the WEB arm on the desktop arm's machinery ───────────────────────────
+//
+// Live 2026-10-06 (agent 1307630, version 826be5d8; no extension in the
+// browser, so the desktop enforcer's web arm handled claude.ai):
+//   desktop_uia claude_desktop applied simple Sonnet 5.5 -> Haiku 4.5   (works)
+//   desktop_web_uia claude.ai failed simple Sonnet 5.5 -> Haiku 4.5
+//     reason from_tier_not_confirmed_fallback_not_submitted
+// The model menu was left OPEN ("Sonnet 5.5 ...", "Effort Medium >", "More
+// models >") and the prompt was never sent. Requirement: the browser behaves
+// EXACTLY like the desktop app.
+
+test('web route: "Sonnet 5.5" is read as standard on claude.ai, through the shared catalog', winOnly, async () => {
+  const rows = await runHarness();
+  const tierOf = (l) => rows.find((r) => r.t === 'webtierof' && r.label === l).tier;
+  assert.equal(tierOf('Model: Sonnet 5.5 Medium'), 'standard');
+  assert.equal(tierOf('Model: Sonnet 5.5'), 'standard');
+  assert.equal(tierOf('Model: Haiku 4.5'), 'economy');
+  assert.equal(tierOf('Model: Opus 5.5 High'), 'premium');
+  assert.equal(tierOf('Model: Opus 5 High'), 'premium');
+  present(rows, 'MrClickLabelsFor');
+  const labels = (host, tier) => rows.find((r) => r.t === 'weblabels' && r.host === host && r.tier === tier).labels;
+  assert.deepEqual(labels('claude.ai', 'standard'), ['Sonnet 5.5', 'Sonnet 5', 'Sonnet']);
+  assert.deepEqual(labels('claude.ai', 'economy'), ['Haiku 4.5', 'Haiku']);
+  assert.deepEqual(labels('claude.ai', 'premium'), ['Opus 5.5', 'Opus 5', 'Opus']);
+  assert.deepEqual(labels('gemini.google.com', 'standard'), ['3.8 Flash']);
+  assert.deepEqual(labels('nowhere.example', 'standard'), []);
+});
+
+test('web route: the from-tier item is FOUND by the catalog labels (the live root cause)', winOnly, async () => {
+  const rows = await runHarness();
+  const from = one(rows, 'webitem', 'from_standard_top');
+  assert.equal(from.found, true, 'the live top-level item "Sonnet 5.5 Most efficient..." must be found');
+  assert.equal(from.label, 'Sonnet 5.5');
+  // The OLD label the web arm used (ai-processes.js tierLabels 2026-09-22) can
+  // never match it -- that is from_tier_not_confirmed.
+  assert.equal(one(rows, 'webitem', 'old_label_sonnet_5').found, false);
+});
+
+test('web route: Haiku / Opus live behind "More models" -- top-level miss, submenu hit', winOnly, async () => {
+  const rows = await runHarness();
+  assert.equal(one(rows, 'webitem', 'target_economy_top').found, false, 'Haiku is not a top-level item');
+  const sub = one(rows, 'webitem', 'target_economy_sub');
+  assert.equal(sub.found, true);
+  assert.equal(sub.label, 'Haiku 4.5');
+  assert.equal(one(rows, 'webitem', 'target_premium_top').found, false);
+  const op = one(rows, 'webitem', 'target_premium_sub');
+  assert.equal(op.found, true);
+  assert.equal(op.label, 'Opus 5.5', 'the most specific label wins; "Opus 5" never matches "Opus 5.5 ..."');
+  assert.ok(op.item.startsWith('Opus 5.5'));
+  const more = rows.find((r) => r.t === 'webmore');
+  assert.equal(more.label, 'More models', 'the same submenu literal the desktop arm hovers');
+  assert.equal(more.matchesItem, true);
+  assert.equal(more.anyTierMatches, false, '"More models" is never a tier');
+});
+
+test('web route SOURCE: target search -> "More models" hover -> search again, as the desktop arm does', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  const run = stripComments(sliceFn(src, 'static void RunWebRoute('));
+  const firstSearch = run.indexOf('WebFindTargetItem(win, ctx.Picker, labels');
+  const hover = run.indexOf('WebOpenMoreModelsAndFind(');
+  assert.ok(firstSearch > 0 && hover > firstSearch, 'top-level search first, then the submenu');
+  assert.ok(/if \(targetItem == null\)\s*\{\s*bool openedMore;\s*targetItem = WebOpenMoreModelsAndFind/.test(run),
+    'the submenu is opened only when the top-level search misses');
+  const more = stripComments(sliceFn(src, 'static AutomationElement WebOpenMoreModelsAndFind('));
+  assert.ok(/SetCursorPos\(p\.X, p\.Y\)/.test(more), 'a real hover: the flyout opens on pointer position');
+  assert.ok(/GetAncestor\(at, GA_ROOT_WINDOW\) == pinnedHwnd/.test(more), 'the cursor only moves over the pinned browser window');
+  assert.ok(/SetCursorPos\(savedPos\.X, savedPos\.Y\)/.test(more), 'the cursor is put back');
+  // The catalog, not the stale surface table, names the items.
+  assert.ok(!/WebPickerTierLabel\(/.test(run), 'the route no longer reads ai-processes.js tierLabels');
+  assert.ok(/MrClickLabelsFor\("browser", surfaceHost, fromTier\)/.test(run));
+  // Refuse only on POSITIVE evidence: the item is there and says it is not selected.
+  assert.ok(/if \(fromItem != null && WebItemSelectionState\(fromItem\) == WEB_SEL_NO\)/.test(run));
+});
+
+test('web route: claude.ai\'s "Switch model?" dialog is auto-confirmed with the same loop', winOnly, async () => {
+  const rows = await runHarness();
+  const cfg = (h) => rows.find((r) => r.t === 'webcfg' && r.host === h);
+  assert.equal(cfg('claude.ai').present, true);
+  assert.equal(cfg('claude.ai').prefix, 'Switch to ');
+  assert.equal(cfg('www.claude.ai').present, true);
+  assert.equal(cfg('gemini.google.com').present, false, 'no dialog declared: never probed');
+  assert.equal(cfg('chatgpt.com').present, false);
+  assert.equal(cfg('api_proxy').present, false);
+  const a = one(rows, 'await', 'web_dialog_confirmed');
+  assert.equal(a.switched, true);
+  assert.equal(a.confirmInvokes, 1);
+  assert.deepEqual(a.invokedNames, ['Switch to Sonnet 5.5']);
+  assert.equal(a.sendPath, 'routed');
+  const n = one(rows, 'await', 'web_dialog_never_confirms');
+  assert.equal(n.switched, false);
+  assert.equal(n.reason, 'confirm_dialog_not_confirmed');
+  assert.equal(n.dismissals, 1);
+  assert.equal(n.dialogOpenAtEnd, false);
+  assert.equal(n.sendPath, 'fallback');
+  assert.equal(one(rows, 'await', 'web_no_dialog_switches').switched, true);
+});
+
+test('web route: a menu left OPEN is closed (Escape, one per level) before the ONE send', winOnly, async () => {
+  const rows = await runHarness();
+  present(rows, 'RouteCollapseMenu');
+  const none = one(rows, 'collapse', 'menu_not_open');
+  assert.equal(none.closed, true);
+  assert.equal(none.escapes, 0, 'no Escape into a page with no menu showing');
+  assert.equal(none.patterns, 0);
+  // THE LIVE CASE: Collapse() leaves claude.ai's menu up.
+  const live = one(rows, 'collapse', 'live_menu_left_open');
+  assert.equal(live.closed, true);
+  assert.equal(live.patterns, 1, 'the pattern is tried first');
+  assert.equal(live.escapes, 1);
+  assert.equal(live.menuOpenAtEnd, false);
+  assert.equal(live.enters, 1, 'then exactly one Enter');
+  const sub = one(rows, 'collapse', 'submenu_and_menu_open');
+  assert.equal(sub.closed, true);
+  assert.equal(sub.escapes, 2, 'submenu, then menu');
+  assert.equal(one(rows, 'collapse', 'pattern_closes_it').escapes, 0);
+  for (const c of Object.values({ a: 'menu_not_open', b: 'live_menu_left_open', c: 'submenu_and_menu_open', d: 'pattern_closes_it' })) {
+    assert.equal(one(rows, 'collapse', c).escapesWhenClosed, 0, c + ': never an Escape once the menu is gone');
+  }
+});
+
+test('web route: a menu that will not close -> reported, NO Enter (it would land in the menu)', winOnly, async () => {
+  const rows = await runHarness();
+  const stuck = one(rows, 'collapse', 'escape_ignored');
+  assert.equal(stuck.closed, false);
+  assert.equal(stuck.reason, 'menu_still_open');
+  assert.equal(stuck.escapes, 3, 'bounded');
+  assert.equal(stuck.enters, 0);
+  const other = one(rows, 'collapse', 'other_window_in_front');
+  assert.equal(other.closed, false);
+  assert.equal(other.reason, 'focus_changed');
+  assert.equal(other.escapes, 0, 'never an Escape into another window');
+  assert.equal(other.enters, 0);
+});
+
+test('web route SOURCE: collapse -> refocus -> exactly ONE Enter, on the routed and the fallback path', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  const run = stripComments(sliceFn(src, 'static void RunWebRoute('));
+  const fb = stripComments(sliceFn(src, 'static void WebFallbackSendOrReport('));
+  const send = stripComments(sliceFn(src, 'static void WebSendAndReport('));
+  // RunWebRoute itself never presses Enter: it hands off to exactly one sender.
+  assert.equal((run.match(/SendKeyPress\(VK_RETURN\)/g) || []).length, 0);
+  assert.equal((fb.match(/SendKeyPress\(VK_RETURN\)/g) || []).length, 1, 'one Enter in the fallback');
+  assert.equal((send.match(/SendKeyPress\(VK_RETURN\)/g) || []).length, 1, 'one Enter in the routed send');
+  // Fallback order: close the menu, then refocus, then the Enter.
+  const iCollapse = fb.indexOf('WebCollapseMenuUia(');
+  const iRefocus = fb.indexOf('WebRefocusUia(');
+  const iEnter = fb.indexOf('SendKeyPress(VK_RETURN)');
+  assert.ok(iCollapse > 0 && iRefocus > iCollapse && iEnter > iRefocus, 'collapse -> refocus -> Enter');
+  assert.ok(/if \(menuWhy != null\)\s*\{[^}]*"_no_fallback_" \+ menuWhy[^}]*return; \}/.test(fb), 'a menu that will not close: no Enter');
+  assert.ok(/if \(el == null\)\s*\{[^}]*"_no_fallback_" \+ whyNot[^}]*return; \}/.test(fb), 'focus that will not return: no Enter');
+  // Routed path: wait (with the dialog) -> collapse -> refocus -> the one send.
+  const iWait = run.indexOf('RouteAwaitSwitch(io, confirmCfg');
+  const iCol = run.indexOf('WebCollapseMenuUia(pinnedHwnd, ctx)', iWait);
+  const iRef = run.indexOf('WebRefocusUia(', iCol);
+  const iSend = run.indexOf('WebSendAndReport(', iRef);
+  assert.ok(iWait > 0 && iCol > iWait && iRef > iCol && iSend > iRef, 'wait -> collapse -> refocus -> send');
+  assert.ok(/if \(!waited\.Switched\)\s*\{ WebFallbackSendOrReport\([^;]*waited\.Reason/.test(run),
+    'an unconfirmed switch goes to the fallback with the wait\'s reason (desktop vocabulary)');
+  assert.ok(/"focus_lost_after_switch_" \+ afterWhy/.test(run), 'the desktop arm\'s post-switch reason');
+  // The menu is not collapsed between the select and the end of the wait.
+  const between = run.slice(run.indexOf('usedSelect = true'), iWait);
+  assert.ok(!/TryCollapsePicker\(picker\); *\r?\n\s*\r?\n\s*AutomationElement verifyEl/.test(between));
+  assert.ok(!/Thread\.Sleep\(300\);\s*TryCollapsePicker/.test(between), 'no collapse right after the select');
+  // Collapse and refocus never press Enter; Escape only into the pinned window.
+  for (const sig of ['static RouteCollapseOutcome RouteCollapseMenu(', 'static string WebCollapseMenuUia(', 'static AutomationElement WebRefocusUia(', 'static bool WebFocusIsInComposer(']) {
+    assert.ok(!/VK_RETURN/.test(stripComments(sliceFn(src, sig))), sig + ' never presses Enter');
+  }
+  const col = stripComments(sliceFn(src, 'static string WebCollapseMenuUia('));
+  assert.ok(/if \(GetForegroundWindow\(\) == pinnedHwnd\) SendKeyPress\(VK_ESCAPE\)/.test(col));
+  const dismiss = run.slice(run.indexOf('io.DismissConfirm = delegate'), run.indexOf('io.NowMs ='));
+  assert.ok(/if \(GetForegroundWindow\(\) == pinnedHwnd\) SendKeyPress\(VK_ESCAPE\)/.test(dismiss));
+  assert.ok(!/pidA == pidB/.test(dismiss), 'another window of the browser process is another browser window, not a modal');
+});
+
+test('web route SOURCE: refocus reads only the composer -- the focused element is compared by RuntimeId, never read', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  const focus = stripComments(sliceFn(src, 'static bool WebFocusIsInComposer('));
+  assert.ok(/AutomationElement\.FocusedElement/.test(focus));
+  assert.ok(!/ReadText\(/.test(focus), 'the focused element\'s text is never read (a password box, the omnibox)');
+  const ref = stripComments(sliceFn(src, 'static AutomationElement WebRefocusUia('));
+  assert.ok(!/AutomationElement\.FocusedElement/.test(ref));
+  assert.ok(/CachedWebComposer\(\)/.test(ref), 'the one door when the pinned reference died');
+  assert.ok(/RouteRefocusComposer\(io\)/.test(ref), 'the SAME bounded loop as the desktop arm');
+  assert.ok(/RouteClickInto\(cand, pinnedHwnd\)/.test(ref), 'the click is refused outside the pinned browser window');
+  assert.ok(/io\.WindowState = delegate \{ return GetForegroundWindow\(\) == pinnedHwnd \? "same" : "other"; \}/.test(ref),
+    'a same-process window is another browser window: focus_changed, never pulled back');
 });
 
 test('desktop route: only a "Switch to <TARGET>" button is ever pressed -- never Cancel, never another model', winOnly, async () => {
