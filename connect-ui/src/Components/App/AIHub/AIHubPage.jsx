@@ -8621,7 +8621,7 @@ function InstallationsView() {
           Pre-configured package ready for mass deployment. Server URL and enrollment secret are baked in — employees see zero setup. Governs both desktop AI apps and browser AI tools from a single agent.
         </div>
 
-        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/desktop-app','CloudFuze-Desktop-Agent.zip','intune')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='intune'?"#6b7280":"#4f46e5",color:"#fff",fontSize:15.2,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='intune'?0.5:1}}>{downloading==='intune'?'⏳ Preparing package...':'⬇ Download Intune Package'}</button>
+        <button disabled={!!downloading} onClick={()=>download('/api/v1/installations/intune-package','CloudFuze-Desktop-Agent.intunewin','intune')} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"10px 0",borderRadius:8,background:downloading==='intune'?"#6b7280":"#4f46e5",color:"#fff",fontSize:15.2,fontWeight:600,border:"none",cursor:downloading?"wait":"pointer",width:"100%",marginBottom:14,opacity:downloading&&downloading!=='intune'?0.5:1}}>{downloading==='intune'?'⏳ Preparing package...':'⬇ Download Intune Package (.intunewin)'}</button>
 
         <details style={{fontSize:14.7,color:"#374151",marginBottom:10}}>
           <summary style={{cursor:"pointer",fontWeight:600,fontSize:15.2,marginBottom:6}}>Intune deployment steps</summary>

@@ -509,6 +509,25 @@ export function mountInstallations(app, db) {
     res.send(zip);
   }));
 
+  // ── Intune package download (.intunewin) ──
+  // Ready-to-upload to Microsoft Intune — built by CI on every deploy.
+  app.get('/api/v1/installations/intune-package', a(async (req, res) => {
+    const intuneDir = join(__dirname, '..', '..', '..', 'agent', 'build', 'intune');
+    let intuneFile = null;
+    try {
+      if (existsSync(intuneDir)) {
+        const files = readdirSync(intuneDir).filter(f => f.endsWith('.intunewin'));
+        if (files.length > 0) intuneFile = join(intuneDir, files[0]);
+      }
+    } catch {}
+    if (!intuneFile) {
+      return res.status(503).json({ error: 'Intune package not available yet. It is built automatically on each deploy.' });
+    }
+    res.setHeader('content-type', 'application/octet-stream');
+    res.setHeader('content-disposition', `attachment; filename="CloudFuze-Desktop-Agent.intunewin"`);
+    res.send(readFileSync(intuneFile));
+  }));
+
   app.get('/api/v1/installations/agent-installer', a(async (req, res) => {
     const platform = req.query.platform || 'windows';
     const serverUrl = apiServerUrl(req);

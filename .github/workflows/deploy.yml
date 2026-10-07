@@ -214,6 +214,37 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+  # ── Blocking: wrap the Electron build as .intunewin for Intune deployment ──
+  intune:
+    name: build Intune package
+    needs: [electron]
+    if: needs.electron.result == 'success'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: electron-dist
+          path: agent-package
+
+      # Download Microsoft's official IntuneWinAppUtil
+      - name: Download IntuneWinAppUtil
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/microsoft/Microsoft-Win32-Content-Prep-Tool/raw/master/IntuneWinAppUtil.exe" -OutFile "IntuneWinAppUtil.exe"
+
+      # Wrap as .intunewin
+      - name: Create .intunewin package
+        run: |
+          ./IntuneWinAppUtil.exe -c agent-package -s install.bat -o output -q
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: intune-package
+          path: output/*.intunewin
+          retention-days: 7
+          if-no-files-found: warn
+
   deploy:
     # TEMPORARY: `test` removed from `needs` on 2026-09-21 to unblock a deploy
     # backlog — `test (agent)` was failing on the ubuntu-latest runner on a test
@@ -225,7 +256,7 @@ jobs:
     # RESTORE `needs: [test, frontend]` once the agent-suite Linux failure is
     # diagnosed with real CI log access and fixed or added to the documented
     # skip pattern above.
-    needs: [frontend, electron]
+    needs: [frontend, electron, intune]
     if: always() && needs.frontend.result == 'success'
     runs-on: [self-hosted, linux, ai-gov]
     env:
@@ -263,6 +294,13 @@ jobs:
         with:
           name: electron-dist
           path: .electron-build
+
+      # Intune package — ready-to-upload .intunewin file
+      - uses: actions/download-artifact@v4
+        if: needs.intune.result == 'success'
+        with:
+          name: intune-package
+          path: .intune-package
 
       - name: Verify the server keeps its own .env
         run: |
@@ -325,6 +363,13 @@ jobs:
             echo "Electron desktop agent build shipped."
           else
             echo "::warning::Electron build artifact not found — desktop download unavailable"
+          fi
+
+          # Ship the Intune package (.intunewin) for the dashboard download
+          if [ -d ".intune-package" ]; then
+            mkdir -p "$DEPLOY_DIR/agent/build/intune"
+            cp .intune-package/*.intunewin "$DEPLOY_DIR/agent/build/intune/" 2>/dev/null || true
+            echo "Intune package shipped."
           fi
 
           if [ -d "$STASH" ] && [ ! -d "$DEPLOY_DIR/agent/prebuilt" ]; then
