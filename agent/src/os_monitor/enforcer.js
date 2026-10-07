@@ -42,6 +42,21 @@ import { buildAttachCensusConfig } from './ai-processes.js';
 // printed anything. See helper-path.js.
 const ENFORCER_SCRIPT = helperScript('enforcer-win.ps1');
 
+// Where the model-router payload is handed to the helper (see start()). Written
+// fresh before every spawn; returns the path, or null if it could not be
+// written (the helper then starts with routing off rather than not at all).
+export const ROUTER_CONFIG_PATH = join(STATE_DIR, 'model-router-config.json');
+export function writeRouterConfigFile(log, path = ROUTER_CONFIG_PATH) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(buildModelRouterConfig()), 'utf8');
+    return path;
+  } catch (e) {
+    log?.warn?.(`enforcer: could not write model-router config: ${e?.message || e}`);
+    return null;
+  }
+}
+
 // How often we refresh the liveness heartbeat the PowerShell deadman reads.
 // The helper gives up on us at 30s stale, so 5s leaves 6 missed beats of slack
 // before a healthy-but-busy monitor gets its hook released out from under it.
@@ -93,6 +108,11 @@ export class Enforcer extends EventEmitter {
     this.#startHeartbeat();
 
     this.log?.info('enforcer: starting keystroke send-blocker (Enter/Ctrl+V swallow)');
+    // The model-router payload (lexicon + catalog + cached policy) outgrew the
+    // 32,767-char limit Windows puts on one environment variable, and spawning
+    // with it failed — the helper crash-looped and nothing was routed. It now
+    // travels in a file the helper reads at start; only the PATH goes in env.
+    const routerConfigFile = writeRouterConfigFile(this.log);
     this.child = spawn(
       'powershell',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ENFORCER_SCRIPT],
@@ -118,7 +138,7 @@ export class Enforcer extends EventEmitter {
           CFAI_MODEL_ROUTER_ENABLED: process.env.CFAI_MODEL_ROUTER_ENABLED || 'true',
           // The fleet `dlp` flag for the AI-evidence routes — see setEvidenceDlp().
           CFAI_EVIDENCE_DLP: this.evidenceDlp ? 'true' : 'false',
-          CFAI_MODEL_ROUTER_CONFIG: JSON.stringify(buildModelRouterConfig()),
+          CFAI_MODEL_ROUTER_CONFIG_FILE: routerConfigFile || '',
           // IDE-hosted AI panels (Claude Code / Copilot Chat in VS Code,
           // Cursor's own composer). Two payloads, same JSON-over-env-var
           // mechanism as CFAI_MODEL_ROUTER_CONFIG above: the helper owns the
