@@ -134,6 +134,7 @@ services:
       # Electron desktop agent build — produced by CI, bind-mounted so the
       # download endpoint can serve it without baking it into the image.
       - ./agent/build/electron-dist:/app/agent/build/electron-dist
+      - ./agent/build/intune:/app/agent/build/intune
     restart: unless-stopped
 
   mongo:
