@@ -84,8 +84,15 @@ test('after a reload, the model WE left the site on is not adopted as the user\'
   assert.equal(second.state().userChoice['claude.ai|anthropic'].tier, 'premium');
 });
 
-test('the user switching back suppresses routing for that conversation, reported once', async () => {
-  const flow = claude();
+// respect_user_override is OPT-IN since 2026-10-07. With it explicitly on, a
+// manual switch still stands routing down for the conversation, as before.
+const RESPECT_OVERRIDE = { 'cfai.routing_policy': { policy: {
+  version: 'ro', fleet_enabled: true, rules: [], catalog_overrides: [],
+  settings: { allow_upgrade: true, respect_user_override: true },
+} } };
+
+test('respect_user_override: true -- the user switching back suppresses routing for that conversation, reported once', async () => {
+  const flow = claude({ store: RESPECT_OVERRIDE });
   flow.send(SIMPLE);
   await flow.settle();
   // The user puts Opus back by hand.
@@ -109,6 +116,91 @@ test('the user switching back suppresses routing for that conversation, reported
   flow.env.location.pathname = '/chat/conv-2';
   const c = flow.send(SIMPLE);
   assert.equal(c.r.decision.result, 'routed');
+});
+
+// Live 2026-10-07 (Gemini): after the user picked a bigger model by hand, every
+// later "hi"/"hello" in the conversation went out unrouted. By default the
+// manual pick is now just the current model, and the next prompt is routed
+// FROM it -- and nothing extra is reported.
+test('DEFAULT: after a manual switch back to Opus, the next simple prompt routes down again (no user_override event)', async () => {
+  const flow = claude();
+  flow.send(SIMPLE);
+  await flow.settle();
+  flow.env.button.textContent = 'Opus 5 High';      // the user picks Opus by hand
+  flow.observePicker();
+  assert.equal(flow.state().userChoice['claude.ai|anthropic'].tier, 'premium', "the pick is the user's choice");
+
+  const before = flow.env.events.length;
+  const a = flow.send(SIMPLE);
+  assert.equal(a.r.decision.result, 'routed', "routed from the user's pick");
+  assert.equal(a.r.decision.from_tier, 'premium');
+  assert.equal(a.r.decision.target_tier, 'economy');
+  assert.equal(a.paused, true);
+  await flow.settle();
+  assert.deepEqual(flow.env.switchCalls, ['Haiku 4.5', 'Haiku 4.5'], 'switched down again');
+  const after = flow.env.events.slice(before);
+  assert.equal(after.length, 1, 'one model_routed for the routed prompt, nothing else');
+  assert.equal(after[0].result, 'applied');
+  assert.ok(!flow.env.events.some((e) => e.result === 'user_override'), 'no user_override event by default');
+});
+
+test('Gemini: manual 3.1 Pro, then "hi" -> 3.5 Flash-Lite, decided at send time from the live text', async () => {
+  const GEMINI = { '3.5 Flash-Lite': 'Open mode picker, currently 3.5 Flash-Lite', '3.1 Pro': 'Open mode picker, currently 3.1 Pro' };
+  const flow = loadRoutingFlow({
+    host: 'gemini.google.com', pathname: '/app/abc', buttonText: 'Open mode picker, currently 3.1 Pro',
+    onSwitch: (label) => GEMINI[label] || null,
+  });
+  flow.observePicker();
+  const { r, paused } = flow.send('hi');
+  assert.equal(r.ctx.complexity, 'simple');
+  assert.equal(r.decision.result, 'routed');
+  assert.equal(r.decision.to_label, '3.5 Flash-Lite');
+  assert.equal(paused, true, 'the send is held BEFORE anything goes out');
+  assert.equal(flow.env.sent, 0, 'nothing sent before the switch');
+  await flow.settle();
+  assert.equal(flow.env.sent, 1, 'then exactly one send');
+  assert.ok(flow.env.button.textContent.includes('3.5 Flash-Lite'));
+  // The user picks 3.1 Pro again by hand; the next "hello" routes down again.
+  flow.env.button.textContent = 'Open mode picker, currently 3.1 Pro';
+  flow.observePicker();
+  const b = flow.send('hello');
+  assert.equal(b.r.decision.result, 'routed');
+  assert.equal(b.r.decision.from_tier, 'premium');
+});
+
+test('NEVER ROUTE AFTER THE SEND: a send the page cannot cancel is never routed (no switch, no re-send)', async () => {
+  const flow = claude();
+  const { r, paused } = flow.send(SIMPLE, { cancelable: false });
+  assert.equal(r.decision.result, 'routed', 'the decision is made');
+  assert.equal(paused, false, 'but a send that cannot be held is not routed');
+  await flow.settle();
+  assert.deepEqual(flow.env.switchCalls, [], 'the picker is never switched after the prompt went out');
+  assert.equal(flow.env.resent.length, 0, 'and the prompt is never sent a second time');
+  assert.equal(flow.env.events.at(-1).result, 'unsupported');
+  assert.equal(flow.env.events.at(-1).reason, 'send_not_pausable');
+  flow.send(SIMPLE, { noEvent: true });
+  await flow.settle();
+  assert.equal(flow.env.events.length, 1, 'reported once per page load');
+  assert.deepEqual(flow.env.switchCalls, []);
+});
+
+test('NEVER ROUTE AFTER THE SEND: a second send event while a route is in flight is swallowed -- one switch, one send', async () => {
+  const flow = claude();
+  const first = flow.send(SIMPLE);                    // pointerdown: paused, route starts
+  assert.equal(first.paused, true);
+  const second = flow.send(SIMPLE);                   // the click that follows, before the switch lands
+  assert.equal(second.paused, true, 'held: the route in flight owns the prompt');
+  assert.equal(flow.env.paused, 2);
+  await flow.settle();
+  assert.deepEqual(flow.env.switchCalls, ['Haiku 4.5'], 'exactly one switch');
+  assert.equal(flow.env.resent.length, 1, 'exactly one re-send');
+  assert.equal(flow.env.events.filter((e) => e.kind === 'model_routed').length, 1);
+  // After the route finished, the next prompt decides on its own again.
+  flow.env.button.textContent = 'Opus 5 High';
+  flow.observePicker();
+  const third = flow.send(SIMPLE);
+  assert.equal(third.r.decision.result, 'routed');
+  assert.equal(third.paused, true);
 });
 
 test('a demanding prompt on Haiku is UPGRADED to Opus with high effort (allow_upgrade default)', async () => {

@@ -34,7 +34,19 @@ export const ACTION_TYPES = ['set_tier', 'cap_tier', 'suggest', 'none'];
 export const RULE_SURFACES = ['browser', 'desktop_app', 'api_proxy'];
 export const COMPLEXITIES = ['simple', 'moderate', 'complex'];
 export const SENSITIVITIES = ['critical', 'high', 'moderate', 'medium', 'low'];
-export const DEFAULT_SETTINGS = Object.freeze({ allow_upgrade: true, respect_user_override: true });
+// respect_user_override is OPT-IN since 2026-10-07 (it was default-on). With it
+// on, a manual model switch stopped routing for the rest of the conversation —
+// live, a user who picked a bigger model by hand and then typed "hi" was never
+// routed down again. Off, the user's pick is the new current model and the next
+// prompt is routed from it. shared/decide-route.js and the desktop enforcer's
+// port read a missing setting the same way (only an explicit true stands down).
+export const DEFAULT_SETTINGS = Object.freeze({ allow_upgrade: true, respect_user_override: false });
+
+// Stamped on the routing_settings doc by every write from this version on.
+// A doc without it predates the flip (see migrateRoutingSettings in
+// seed-routing.js), and its respect_user_override: true is the old default the
+// PUT used to persist alongside whatever key the admin actually sent.
+export const SETTINGS_REV = 2;
 
 // Which tier each v1 complexity bucket corresponds to — the mapping the
 // built-ins have always encoded by name ("Simple prompt → Haiku").

@@ -5,8 +5,8 @@
 // other loaders here: content.js is one giant classic-script IIFE that touches
 // document/chrome/window at load time and cannot be evaluated whole in Node.
 //
-// This region's only free variable is `document`, so the loader hands in a fake
-// one. That is the entire dependency — which is what makes the region worth
+// This region's free variables are `document` and `isCfaiOwnNode`, so the loader
+// hands in fakes. That is the entire dependency — which is what makes the region worth
 // slicing rather than mocking a browser.
 
 import { readFileSync } from 'node:fs';
@@ -36,12 +36,16 @@ function region() {
  * Instantiate the region against a fake document.
  * @returns {{findClickableByText:Function, isVisibleEl:Function, visibleMenuOptions:Function}}
  */
-export function loadMenuLookup(fakeDocument) {
-  const body = 'const document = arguments[0];\n' + region()
+export function loadMenuLookup(fakeDocument, extra) {
+  // isCfaiOwnNode (our own injected UI is never a model menu) lives outside the
+  // region; a fake document holds none of our nodes, so the default says no.
+  const body = 'const document = arguments[0];\n'
+    + 'const isCfaiOwnNode = (arguments[1] && arguments[1].isCfaiOwnNode) || (() => false);\n' + region()
     + '\n  return { findClickableByText, isVisibleEl, visibleMenuOptions, MENU_CONTAINER_SELECTOR,'
-    + ' confirmLabelHit, confirmButtonMatches, findSwitchConfirm, confirmModelSwitch, SWITCH_CONFIRM_DIALOG_SELECTOR };';
+    + ' confirmLabelHit, confirmButtonMatches, findSwitchConfirm, confirmModelSwitch, SWITCH_CONFIRM_DIALOG_SELECTOR,'
+    + ' anyModelMenuOpen, closeOpenMenus, OPEN_MENU_SELECTOR };';
   // eslint-disable-next-line no-new-func
-  return new Function(body)(fakeDocument);
+  return new Function(body)(fakeDocument, extra);
 }
 
 // ── A DOM small enough to reason about, real enough to exercise the rules ────

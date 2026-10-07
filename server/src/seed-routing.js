@@ -28,7 +28,7 @@
 
 import crypto from 'node:crypto';
 import {
-  SCHEMA_VERSION, RULE_SURFACES, COMPLEXITY_TIER, COMPLEXITY_EFFORT,
+  SCHEMA_VERSION, SETTINGS_REV, RULE_SURFACES, COMPLEXITY_TIER, COMPLEXITY_EFFORT,
   translateV1Rule, catalogOverrideFor,
 } from './lib/routing-schema.js';
 
@@ -215,4 +215,29 @@ export async function seedDefaultRoutingRules(db) {
     console.log(`[seed] routing rules inserted: ${missing.length}`);
   }
   return { inserted: missing.length, retired: stale.length, migrated, translated, overrides };
+}
+
+// ── routing_settings: respect_user_override became opt-in (2026-10-07) ──────
+//
+// The default flipped from true to false (lib/routing-schema.js). A database
+// with NO settings doc already reads the new default; nothing to do there.
+//
+// A doc written before the flip carries `respect_user_override: true` whether
+// or not anyone chose it: PUT /routing/settings always persisted EVERY key,
+// filling the ones the admin did not send from the defaults. Such a doc cannot
+// prove the true was a decision, so it is treated as the untouched old default
+// and flipped once. The doc is then stamped settings_rev, as every PUT now
+// stamps it, so an admin who sets true again after this keeps it for good.
+// Idempotent: a stamped doc is never touched again.
+export async function migrateRoutingSettings(db) {
+  const col = db.collection('routing_settings');
+  const doc = await col.findOne({ id: 'default' });
+  if (!doc || doc.settings_rev === SETTINGS_REV) return { flipped: false, stamped: false };
+  const flip = doc.respect_user_override === true;
+  await col.updateOne(
+    { id: 'default' },
+    { $set: { ...(flip ? { respect_user_override: false } : {}), settings_rev: SETTINGS_REV, updated_at: new Date() } },
+  );
+  if (flip) console.log('[seed] routing settings: respect_user_override default flipped to false (pre-2026-10-07 doc)');
+  return { flipped: flip, stamped: true };
 }

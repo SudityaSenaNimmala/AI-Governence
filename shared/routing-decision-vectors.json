@@ -23,6 +23,18 @@
       "fleet_enabled": false
     },
 
+    "server_default_v2": {
+      "version": "p-server-default", "rules": [], "catalog_overrides": [],
+      "settings": { "allow_upgrade": true, "respect_user_override": false },
+      "fleet_enabled": true
+    },
+
+    "settings_missing": {
+      "version": "p-no-settings", "rules": [], "catalog_overrides": [],
+      "settings": {},
+      "fleet_enabled": true
+    },
+
     "no_respect_override": {
       "version": "p-nro", "rules": [], "catalog_overrides": [],
       "settings": { "allow_upgrade": true, "respect_user_override": false },
@@ -230,6 +242,24 @@
     { "id": "user-override-suppresses", "policy": "default_v2",
       "ctx": { "surface": "browser", "host_or_app": "claude.ai", "provider": "anthropic", "current_tier": "premium", "complexity": "simple", "user_override": true, "fleet_enabled": true, "machine_enabled": true },
       "expect": { "result": "user_override", "reason": "user_override", "target_tier": null, "effort": null, "rule_id": null, "mode": null, "to_label": null } },
+    { "id": "user-override-default-off-server-default", "policy": "server_default_v2",
+      "ctx": { "surface": "browser", "host_or_app": "claude.ai", "provider": "anthropic", "current_tier": "premium", "complexity": "simple", "user_override": true, "fleet_enabled": true, "machine_enabled": true },
+      "expect": { "result": "routed", "reason": "downgrade", "target_tier": "economy", "to_label": "Haiku 4.5" } },
+    { "id": "user-override-default-off-settings-missing", "policy": "settings_missing",
+      "ctx": { "surface": "browser", "host_or_app": "claude.ai", "provider": "anthropic", "current_tier": "premium", "complexity": "simple", "user_override": true, "fleet_enabled": true, "machine_enabled": true },
+      "expect": { "result": "routed", "reason": "downgrade", "target_tier": "economy", "to_label": "Haiku 4.5" } },
+    { "id": "user-override-default-off-null-policy", "policy": "none",
+      "ctx": { "surface": "browser", "host_or_app": "claude.ai", "provider": "anthropic", "current_tier": "premium", "complexity": "simple", "user_override": true, "fleet_enabled": true, "machine_enabled": true },
+      "expect": { "result": "routed", "reason": "downgrade", "target_tier": "economy", "to_label": "Haiku 4.5" } },
+    { "id": "user-override-default-off-legacy-v1-array", "policy": "legacy_v1",
+      "ctx": { "surface": "browser", "host_or_app": "claude.ai", "provider": "anthropic", "current_tier": "premium", "complexity": "simple", "user_override": true, "fleet_enabled": true, "machine_enabled": true },
+      "expect": { "result": "routed", "reason": "downgrade", "target_tier": "economy" } },
+    { "id": "user-override-gemini-manual-pro-then-hi-routes-down", "policy": "server_default_v2",
+      "ctx": { "surface": "browser", "host_or_app": "gemini.google.com", "provider": "google", "current_tier": "premium", "user_tier": "premium", "complexity": "simple", "user_override": true, "fleet_enabled": true, "machine_enabled": true },
+      "expect": { "result": "routed", "reason": "downgrade", "target_tier": "economy", "to_label": "3.5 Flash-Lite" } },
+    { "id": "user-override-desktop-default-off", "policy": "server_default_v2",
+      "ctx": { "surface": "desktop_app", "host_or_app": "claude_desktop", "provider": "anthropic", "current_tier": "premium", "complexity": "simple", "user_override": true, "fleet_enabled": true, "machine_enabled": true },
+      "expect": { "result": "routed", "reason": "downgrade", "target_tier": "economy" } },
     { "id": "user-override-ignored-when-not-respected", "policy": "no_respect_override",
       "ctx": { "surface": "browser", "host_or_app": "claude.ai", "provider": "anthropic", "current_tier": "premium", "complexity": "simple", "user_override": true, "fleet_enabled": true, "machine_enabled": true },
       "expect": { "result": "routed", "reason": "downgrade", "target_tier": "economy", "to_label": "Haiku 4.5" } },

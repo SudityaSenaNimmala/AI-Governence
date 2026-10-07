@@ -1162,6 +1162,9 @@ export function routingMetaFields(e) {
   re('rule_id', ROUTING_ID_RE, 64);
   en('result', ROUTING_RESULTS);
   re('reason', ROUTING_REASON_RE, 64);
+  // How the prompt went out after the route: 'enter' | 'button' | an unsent
+  // code ('not_submitted', 'unsafe_text_changed', …). A short code, never text.
+  re('send', ROUTING_REASON_RE, 64);
   en('effort_from', ROUTING_EFFORTS);
   en('effort_to', ROUTING_EFFORTS);
   if (typeof e?.len === 'number' && Number.isFinite(e.len) && e.len >= 0) {

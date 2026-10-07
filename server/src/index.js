@@ -49,7 +49,7 @@ import { mountClientErrors } from './routes/client-errors.js';
 import { mountTriageSelftest } from './routes/triage-selftest.js';
 import { mountErrorCapture } from './lib/error-capture.js';
 import { seedAiPlatforms } from './seed-platforms.js';
-import { seedDefaultRoutingRules } from './seed-routing.js';
+import { seedDefaultRoutingRules, migrateRoutingSettings } from './seed-routing.js';
 import { JWT_SECRET, ENROLL_SECRET, ADMIN_TOKEN, adminAuthIsOpen, reviewAuthIsOpen } from './auth.js';
 import governanceRouter from './governance/app.js';
 
@@ -60,6 +60,7 @@ const db = await openDb();
 try { await applyInitialSchema(db); } catch (e) { console.warn('[db] schema init failed (DB may be full):', e.message); }
 try { await seedAiPlatforms(db); } catch (e) { console.warn('[db] platform seed failed:', e.message); }
 try { await seedDefaultRoutingRules(db); } catch (e) { console.warn('[db] routing seed failed:', e.message); }
+try { await migrateRoutingSettings(db); } catch (e) { console.warn('[db] routing settings migration failed:', e.message); }
 
 const app = express();
 app.use(cors());

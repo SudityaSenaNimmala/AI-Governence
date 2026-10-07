@@ -289,7 +289,11 @@ export function normalizePolicy(policy) {
     catalog_overrides: asList(p.catalog_overrides),
     settings: {
       allow_upgrade: settings.allow_upgrade !== false,
-      respect_user_override: settings.respect_user_override !== false,
+      // OPT-IN since 2026-10-07 (was opt-out). A manual model switch no longer
+      // stands routing down for the conversation: the user's pick becomes the
+      // current model and the next prompt is routed from it. Only an explicit
+      // `true` restores the old behaviour.
+      respect_user_override: settings.respect_user_override === true,
     },
     fleet_enabled: p.fleet_enabled !== false,
   };
@@ -427,7 +431,8 @@ function result(fields) {
  *
  * ORDER (fixed; the vectors pin it):
  *   1. disabled  — policy/ctx fleet_enabled false, or machine_enabled false.
- *   2. override  — ctx.user_override && settings.respect_user_override.
+ *   2. override  — ctx.user_override && settings.respect_user_override
+ *                  (opt-in: missing / anything but true = routing continues).
  *   3. surface   — unknown surface / provider mismatch / unreadable current tier
  *                  -> 'unsupported'.
  *   4. rule      — first matching enabled rule by priority; else the built-in

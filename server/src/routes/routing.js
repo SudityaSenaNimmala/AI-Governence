@@ -20,7 +20,7 @@ import { a } from '../util.js';
 import { requireMachineAuth, requireReviewAuth } from '../auth.js';
 import { resolveFeatures } from './feature-settings.js';
 import {
-  SCHEMA_VERSION, RULE_SURFACES, DEFAULT_SETTINGS,
+  SCHEMA_VERSION, RULE_SURFACES, DEFAULT_SETTINGS, SETTINGS_REV,
   normalizeRuleInput, normalizeCatalogOverride, normalizeSettings,
   toLegacyView, policyVersion,
 } from '../lib/routing-schema.js';
@@ -169,7 +169,9 @@ export function mountRouting(app, db) {
     if (error) return res.status(400).json({ error });
     await settingsC().updateOne(
       { id: SETTINGS_ID },
-      { $set: { id: SETTINGS_ID, ...value, updated_at: new Date() } },
+      // settings_rev marks a doc written after the respect_user_override
+      // default flipped, so migrateRoutingSettings never touches it.
+      { $set: { id: SETTINGS_ID, ...value, settings_rev: SETTINGS_REV, updated_at: new Date() } },
       { upsert: true },
     );
     res.json(value);
