@@ -9,7 +9,7 @@
 
 export const MODEL_CATALOG = {
   "schema_version": 1,
-  "catalog_version": "2026-10-07",
+  "catalog_version": "2026-10-05",
   "_doc": "Canonical model-routing catalog. Edited HERE only; browser-extension/content/model-routing.js is generated from it by `node scripts/gen-shared-routing.mjs`. Consumed by shared/decide-route.js (and its C# port in the desktop enforcer). Spec: docs/MODEL_ROUTING_COMPLEXITY.md section 7. `verified: true` only where live evidence is recorded in code (see each `evidence`). Label matching rule: a label/pattern matches text case-insensitively at a token boundary - the char before it must not be [0-9A-Za-z] and the char after it must not be [0-9A-Za-z.-]; longest pattern wins.",
   "tiers": [
     "economy",
@@ -271,20 +271,8 @@ export const MODEL_CATALOG = {
         "item_selected_prefix": "Selected "
       },
       "effort": {
-        "supported": true,
-        "verified": false,
-        "kind": "toggle",
-        "evidence": "Measured by screenshot 2026-10-06/07: the mode menu ends with a separator and 'Extended thinking / Complex problem solving', a TOGGLE (checkmark when on) independent of the model (it can be on together with 3.6 Flash). The button label gains the suffix 'Extended' when it is on ('Flash Extended'). Setting it (agent enforcer-win.ps1 RouteApplyEffortToggle, extension content.js setEffortToggleInUI) has not had a live pass yet.",
-        "toggle_label": "Extended thinking",
-        "button_suffix": "Extended",
-        "on_for": [
-          "high"
-        ],
-        "off_for": [
-          "low",
-          "medium"
-        ],
-        "when_unset": "low"
+        "supported": false,
+        "verified": false
       },
       "tiers": {
         "premium": {
