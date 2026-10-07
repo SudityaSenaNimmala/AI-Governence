@@ -107,8 +107,33 @@ test('gate: focus already on the composer, no menu -> ONE Enter, after a settle 
   const g = one(rows, 'gate', 'focus_ok_stable');
   assert.equal(g.ok, true);
   assert.equal(g.enters, 1);
-  assert.equal(g.settles, 1, 'focus is checked twice, ROUTE_GATE_SETTLE_MS apart');
+  assert.equal(g.settles, 1, 'menu quiet time unknown: focus is checked twice, ROUTE_GATE_RECHECK_MS apart');
+  const c = rows.find((r) => r.t === 'gate_const');
+  assert.ok(c && c.recheckMs >= 40 && c.recheckMs <= 60, `the re-check is 40-60ms (was a flat 150ms settle), got ${c && c.recheckMs}`);
+  assert.equal(g.elapsed, c.recheckMs);
   assert.equal(g.refocuses + g.collapses, 0, 'nothing to do');
+});
+
+test('gate: the re-check is anchored on when the menu was first seen closed -- a single read once that is past', winOnly, async () => {
+  // 2026-10-07 "it changed the model but the prompt is being sent with a lag":
+  // the flat 150ms settle ran after every switch, even with the menu long gone.
+  const rows = await runHarness();
+  const c = rows.find((r) => r.t === 'gate_const');
+  const q = one(rows, 'gate', 'quiet_single_read');
+  assert.equal(q.ok, true);
+  assert.equal(q.enters, 1);
+  assert.equal(q.settles, 0, 'the menu has been gone longer than the re-check: one read after the gate\'s own menu check');
+  assert.equal(q.elapsed, 0);
+  const p = one(rows, 'gate', 'quiet_partial_wait');
+  assert.equal(p.ok, true);
+  assert.equal(p.settles, 1);
+  assert.equal(p.elapsed, c.recheckMs - 20, 'waits only what is left of the re-check window');
+  // The hand-back protection still holds inside the window.
+  const h = one(rows, 'gate', 'quiet_handback');
+  assert.equal(h.ok, true);
+  assert.equal(h.refocuses, 1, 'a hand-back after the read is caught by the re-check and undone');
+  assert.equal(h.focusAtEnd, 'composer');
+  assert.equal(h.menuOpenAtEnd, false);
 });
 
 test('gate: Material hands focus back to the picker trigger after the menu closes -> refocus, then ONE Enter', winOnly, async () => {
@@ -315,6 +340,33 @@ test('hook backstop: a route "in progress" past the deadline is released by the 
   const c = one(rows, 'claims', 'off_route_thread');
   assert.equal(c.send, true);
   assert.equal(c.resend, false, 'a re-send only ever happens on a route thread that owns its send');
+});
+
+// ── 4b. stage timings on the route event ────────────────────────────────────
+
+test('route event: t_switch_ms / t_send_ms / t_total_ms are bounded integers, a stage that did not happen is omitted', winOnly, async () => {
+  const rows = await runHarness();
+  const parse = (c) => JSON.parse('{' + one(rows, 'timing', c).json.replace(/^,/, '') + '}');
+  assert.deepEqual(parse('routed'), { t_switch_ms: 412, t_send_ms: 88, t_total_ms: 500 });
+  assert.deepEqual(parse('not_sent'), { t_switch_ms: 412 });
+  assert.deepEqual(parse('unrouted'), { t_total_ms: 300 });
+  assert.deepEqual(parse('nothing'), {});
+  assert.deepEqual(parse('runaway'), { t_switch_ms: 100, t_send_ms: 60000, t_total_ms: 60000 });
+  assert.deepEqual(parse('no_start'), {});
+});
+
+test('SOURCE: the route event carries the run\'s timings; the switch and the send are stamped where they happen', async () => {
+  const src = await readFile(ENFORCER, 'utf8');
+  const emit = stripComments(sliceFn(src, 'static void EmitRoute('));
+  assert.ok(/RouteTimingFields\(run\.StartedMs, run\.SwitchedMs, run\.SentMs\)/.test(emit), 'EmitRoute appends the stage timings');
+  const claim = stripComments(sliceFn(src, 'static bool RouteClaimSend('));
+  assert.ok(/if \(won\) r\.SentMs = RouteNowMs\(\);/.test(claim), 'the send is stamped by the one-send claim');
+  for (const sig of ['static void RunRoute(', 'static void RunWebRoute(']) {
+    const body = stripComments(sliceFn(src, sig));
+    const iWait = body.indexOf('RouteAwaitSwitch(io');
+    const iNote = body.indexOf('if (waited.Switched) RouteNoteSwitched();');
+    assert.ok(iWait > 0 && iNote > iWait && iNote < body.indexOf('TryCollapsePicker(picker)', iWait), sig + ': stamped right after the switch reads back');
+  }
 });
 
 // ── 5. SOURCE: every path wired to the invariant ────────────────────────────

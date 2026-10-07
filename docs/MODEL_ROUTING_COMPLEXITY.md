@@ -481,10 +481,13 @@ How:
   `Promise.race` against the same 6 s; a timed-out switch is cancelled at its next
   step and the paused prompt goes out once, unrouted (`watchdog_timeout`).
 * **Pre-Enter gate** (`RouteFocusGate`): the pinned window in front, no menu
-  showing, focus on the composer holding exactly the prompt — read twice, 150 ms
-  apart, because Angular Material hands focus back to the menu trigger when its
-  menu closes, and an Enter then lands on the trigger and reopens the menu. A page
-  dialog holding focus (a Pro upsell / usage-limit notice) gets one Escape.
+  showing, focus on the composer holding exactly the prompt — re-read
+  `ROUTE_GATE_RECHECK_MS` (50 ms) after the menu was first seen closed with nothing
+  disturbing focus since, because Angular Material (and Radix) hands focus back to
+  the menu trigger when its menu closes, and an Enter then lands on the trigger and
+  reopens the menu. When the menu has already been gone that long, one read is
+  enough (see §7.9). A page dialog holding focus (a Pro upsell / usage-limit
+  notice) gets one Escape.
 * **The refocus click is hit-tested** (`RouteClickInto`): a point is clicked only
   if the element there is the composer, inside it, or one of its two nearest
   ancestors. The old fixed point 12 px in from the composer's right edge was
@@ -535,9 +538,39 @@ switch to a bigger model, "hi" was never routed down again.
   post-send read exits as soon as the composer empties (was a flat 1.5 s on the
   web, which is why `model_routed` landed 1.5 s after its own send). Harness
   (`route-latency-harness.ps1`, typical Gemini switch): Enter → send waiting 800 ms
-  → 340 ms; Enter → report 2300 ms → 490 ms (web). The gate's one 150 ms settle
-  re-check (§7.7) is unchanged.
+  → 340 ms; Enter → report 2300 ms → 490 ms (web). (The gate's settle was then
+  still a flat 150 ms; see §7.9.)
 
 Pinned by `agent/tests/enforcer-route-held-enter.test.mjs`,
 `agent/tests/enforcer-route-latency.test.mjs` and
 `browser-extension/tests/routing-flow.test.mjs`.
+
+### 7.9 Send immediately after the switch *(2026-10-07)*
+
+Live report (Gemini in Edge, desktop agent web arm; Claude Desktop similar): "it
+changed the model but the prompt is being sent with a lag. It needs to be sent
+immediately after the model is changed." The wait was between the switch reading
+back and the one Enter: refocus (a flat 120 ms after each SetFocus) + the gate's
+flat 150 ms settle.
+
+* **The gate re-check is anchored on the menu, not on the gate.** Each route
+  records when a model menu was first seen closed with nothing disturbing focus
+  since (an activation, Collapse, Escape, SetFocus, or click resets it). The
+  confirming read comes 50 ms after that point. If the menu has been gone at least
+  that long, the read taken right after the gate's own "no menu" check is the only
+  one. A hand-back lands no later than shortly after the menu leaves the page, and
+  the after-Enter `menu_reopened` re-send stays the backstop.
+* **Refocus is polled.** After SetFocus, focus is read every 30 ms (was one 120 ms
+  sleep). A click is only tried once SetFocus has had its full 120 ms.
+* **Collapse goes direct.** It uses the picker the switch wait just re-found (no
+  tree walk). A host whose Collapse() did not close its menu while an Escape did
+  (claude.ai) goes Escape-first next time, under the same Escape rules.
+* **Stage timings on `model_routed`** (desktop enforcer): `t_switch_ms` (Enter held
+  → switch verified), `t_send_ms` (switch verified → Enter sent), `t_total_ms`
+  (Enter held → Enter sent). These are integers in 0..60000, and a stage that did
+  not happen is omitted. The server keeps them (`routingMetaFields`).
+
+Harness (switch verified → Enter, waiting only): web 190 → 90 ms (focus on the
+composer) and 310 → 120 ms (focus handed back to the trigger); desktop 150 → 50 ms
+and 270 → 80 ms. Pinned by `agent/tests/enforcer-route-latency.test.mjs` and
+`agent/tests/enforcer-route-watchdog.test.mjs`.

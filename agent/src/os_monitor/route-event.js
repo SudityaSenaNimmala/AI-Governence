@@ -33,6 +33,9 @@ const effort = (v) => {
   return EFFORTS.has(e) ? e : null;
 };
 const str = (v, max) => (typeof v === 'string' && v.length > 0 ? v.slice(0, max) : null);
+// Stage timings (enforcer RouteTimingFields): integer ms, 0..60000, else dropped.
+const STAGE_MS_MAX = 60_000;
+const stageMs = (v) => (Number.isInteger(v) && v >= 0 && v <= STAGE_MS_MAX ? v : null);
 
 /** The routing v2 fields for one route line. Absent values are omitted. */
 export function modelRoutedFields(ev) {
@@ -56,5 +59,9 @@ export function modelRoutedFields(ev) {
   put('effort_from', effort(ev?.effort_from));
   put('effort_to', effort(ev?.effort_to));
   if (typeof ev?.len === 'number' && Number.isFinite(ev.len) && ev.len >= 0) out.len = ev.len;
+  // Where a route's time went: Enter held -> switch verified -> Enter sent.
+  put('t_switch_ms', stageMs(ev?.t_switch_ms));
+  put('t_send_ms', stageMs(ev?.t_send_ms));
+  put('t_total_ms', stageMs(ev?.t_total_ms));
   return out;
 }

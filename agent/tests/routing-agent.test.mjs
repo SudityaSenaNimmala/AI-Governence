@@ -279,6 +279,18 @@ test('model_routed: route lines map to the routing v2 allowlist, with no prompt 
   assert.equal(JSON.stringify(leak).includes('secret'), false);
 });
 
+test('model_routed: the enforcer\'s stage timings travel as bounded integers (t_switch_ms / t_send_ms / t_total_ms)', () => {
+  const f = modelRoutedFields({ result: 'ok', t_switch_ms: 310, t_send_ms: 85, t_total_ms: 395 });
+  assert.equal(f.t_switch_ms, 310);
+  assert.equal(f.t_send_ms, 85);
+  assert.equal(f.t_total_ms, 395);
+  for (const bad of [-1, 60001, 2.5, '90', null, NaN]) {
+    const g = modelRoutedFields({ result: 'ok', t_switch_ms: bad, t_send_ms: bad, t_total_ms: bad });
+    assert.equal('t_switch_ms' in g || 't_send_ms' in g || 't_total_ms' in g, false, String(bad));
+  }
+  assert.equal('t_send_ms' in modelRoutedFields({ result: 'failed' }), false, 'a stage that did not happen is omitted');
+});
+
 // ── one timer owner ──────────────────────────────────────────────────────────
 
 test('TIMERS: the policy poll is started only in start() and cleared in stop()', async () => {

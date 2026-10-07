@@ -1136,11 +1136,17 @@ const ROUTING_MODEL_RE = /^[A-Za-z0-9._:/@-]{1,120}$/;
 const ROUTING_ID_RE = /^[A-Za-z0-9_:.-]{1,64}$/;
 const ROUTING_REASON_RE = /^[a-z0-9_.-]{1,64}$/;
 const ROUTING_LEN_MAX = 10_000_000;
+// Per-stage route timings from the desktop enforcer: t_switch_ms (Enter held ->
+// switch verified), t_send_ms (switch verified -> Enter sent), t_total_ms
+// (Enter held -> Enter sent). Integer milliseconds in 0..60000; anything else
+// is dropped (never clamped or coerced).
+const ROUTING_STAGE_MS_KEYS = ['t_switch_ms', 't_send_ms', 't_total_ms'];
+const ROUTING_STAGE_MS_MAX = 60_000;
 
 export const ROUTING_META_KEYS = [
   'mechanism', 'surface', 'host_or_app', 'provider', 'from_tier', 'from_label',
   'to_tier', 'to_label', 'model', 'complexity', 'rule_id', 'result', 'reason',
-  'effort_from', 'effort_to', 'len',
+  'effort_from', 'effort_to', 'len', ...ROUTING_STAGE_MS_KEYS,
 ];
 
 export function routingMetaFields(e) {
@@ -1169,6 +1175,10 @@ export function routingMetaFields(e) {
   en('effort_to', ROUTING_EFFORTS);
   if (typeof e?.len === 'number' && Number.isFinite(e.len) && e.len >= 0) {
     out.len = Math.min(Math.round(e.len), ROUTING_LEN_MAX);
+  }
+  for (const k of ROUTING_STAGE_MS_KEYS) {
+    const v = e?.[k];
+    if (Number.isInteger(v) && v >= 0 && v <= ROUTING_STAGE_MS_MAX) out[k] = v;
   }
   return out;
 }

@@ -9,7 +9,9 @@
 #   * the menu's items are in the tree 20ms after Expand();
 #   * the picker reads the target tier 100ms after the item is selected;
 #   * the menu is gone 30ms after Collapse();
-#   * focus is already on the composer (the gate's one settle re-check);
+#   * focus is already on the composer (the gate's one re-check), or -- the
+#     refocus rows -- was handed to the picker trigger and a SetFocus lands
+#     20ms later;
 #   * the composer empties 120ms after the Enter (an accessibility hop).
 # UIA call COSTS are not modelled (they are the same before and after); this is
 # the time the route spends WAITING. The loops are the REAL C# (compiled out of
@@ -136,6 +138,27 @@ SetDel $gIo $io 'Refocus' { $null }
 SetDel $gIo $io 'Sleep' { param([int]$ms) $script:G.now += $ms }
 $o = Call 'RouteFocusGate' @($io)
 Emit @{ t = 'loop'; name = 'gate'; ok = [bool](Nested 'RouteGateOutcome').GetField('Ok').GetValue($o); ms = [int]$script:G.now }
+
+# ---- 4b. putting focus back on the composer after the switch (RouteRefocusComposer)
+# Two worlds: focus already on the composer (nothing to do), and the common
+# Gemini / Claude case -- the closing menu handed focus to the picker trigger,
+# and a SetFocus on the composer lands 20ms later.
+$rIo = Nested 'RouteRefocusIo'
+foreach ($case in @(@('refocus_ok', 0), @('refocus_handback', 1))) {
+  $script:R = @{ now = 0; focusAt = $(if ($case[1] -eq 0) { 0 } else { [long]::MaxValue }); focuses = 0; clicks = 0 }
+  $io = [Activator]::CreateInstance($rIo, $true)
+  SetDel $rIo $io 'WindowState' { 'same' }
+  SetDel $rIo $io 'RestoreForeground' { }
+  SetDel $rIo $io 'FocusVerdict' { if ($script:R.now -ge $script:R.focusAt) { $null } else { 'focus_not_in_composer' } }
+  SetDel $rIo $io 'CandidateVerdict' { $null }
+  SetDel $rIo $io 'FocusCandidate' { $script:R.focuses++; if ($script:R.focusAt -eq [long]::MaxValue) { $script:R.focusAt = $script:R.now + 20 }; $true }
+  SetDel $rIo $io 'ClickCandidate' { $script:R.clicks++; $true }
+  SetDel $rIo $io 'NowMs' { [long]$script:R.now }
+  SetDel $rIo $io 'Sleep' { param([int]$ms) $script:R.now += $ms }
+  $o = Call 'RouteRefocusComposer' @($io)
+  Emit @{ t = 'loop'; name = $case[0]; ok = [bool](Nested 'RouteRefocusOutcome').GetField('Ok').GetValue($o); ms = [int]$script:R.now;
+          focuses = $script:R.focuses; clicks = $script:R.clicks }
+}
 
 # ---- 5. after the ONE Enter (RouteAfterEnter): web 1500ms window, desktop 200 --
 $aIo = Nested 'RouteAfterEnterIo'
