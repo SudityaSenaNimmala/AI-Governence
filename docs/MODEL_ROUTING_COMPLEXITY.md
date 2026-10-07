@@ -359,7 +359,7 @@ do about it**, for every engine:
 |---|---|
 | `shared/model-catalog.json` | Per **provider** × tier: `api_ids`, `effort_supported`. Per **host** (claude.ai, chatgpt.com, gemini.google.com, aistudio.google.com, perplexity.ai, chat.mistral.ai) and per **desktop app** (`claude_desktop`, `chatgpt_desktop`) × tier: `click_labels` (what to click, most specific first) and `button_label_patterns` (how to read the current tier off the picker button), plus `effort` and `picker` metadata. `verified: true` only where a live pass is recorded in code (`evidence`). |
 | `shared/decide-route.js` | `decideRoute(ctx, policy, catalog)` — pure, no I/O, no imports, JSON in/out. |
-| `shared/routing-decision-vectors.json` | 80 decision cases + 30 label-reading cases. **The contract.** The extension bundle and the desktop enforcer's C# port must both pass all of them. |
+| `shared/routing-decision-vectors.json` | 97 decision cases + 30 label-reading cases. **The contract.** The extension bundle and the desktop enforcer's C# port must both pass all of them. |
 | `browser-extension/content/model-routing.js` | **Generated** classic-script bundle of the two above (`node scripts/gen-shared-routing.mjs`), publishing `window.__cfaiRouting`. A test fails if it drifts. |
 
 ### 7.1 Label matching
@@ -402,7 +402,7 @@ click_labels, model }`, where `result` is one of `routed` | `suggested` | `obser
 3. **Surface** — no catalog entry (after overrides) → `unsupported/unknown_surface`; ctx provider ≠ catalog provider → `provider_mismatch`; picker tier unreadable → `current_tier_unknown`.
 4. **Rule** — enabled rules by ascending `priority` (default 50), ties in document order; the first whose scope (`surfaces`, `hosts` ∪ `apps`) and conditions (`provider`, `complexity`, `current_tier`) all match wins. **A rule with a `sensitivity` condition only ever matches on `api_proxy`** — on browser/desktop it is skipped, not applied with the condition ignored. `set_tier` → `target_tier` (else the tier of its `ui_name`/`model`, else built-in); `cap_tier` → min(built-in, cap); `suggest` → mode `suggest`; `none` → `noop/rule_action_none`. A v1 rule's target is the catalog tier of its `ui_name` (or its model id's tier), else the built-in. **No rule** → built-in: `simple → economy`, `moderate → standard`, `complex → premium`; `unknown` → `noop/unknown_complexity`.
 5. **Cap** — only when `allow_upgrade` is **false**: the target is capped at `user_tier` (else `current_tier`). Default is true: upgrades above the user's model are intended.
-6. **Effort** — built-in `simple → low`, `complex → high`, `moderate →` leave alone; a rule's `action.effort` overrides. Dropped to null unless the surface has an effort control (`catalog.hosts[h].effort.supported`) **and** the target tier's provider entry has `effort_supported` (on `api_proxy`, the provider flag alone). Today: claude.ai and Claude Desktop, Opus/Sonnet only.
+6. **Effort** — built-in `simple → low`, `complex → high`, `moderate →` leave alone; a rule's `action.effort` overrides. Dropped to null unless the surface has an effort control (`catalog.hosts[h].effort.supported`) **and** the target tier's provider entry has `effort_supported` (on `api_proxy`, the provider flag alone). Today: claude.ai and Claude Desktop, Opus/Sonnet only — plus **effort toggles** (`effort.kind: "toggle"`, gemini.google.com *Extended thinking*, §7.9): model-independent, so settable on every tier; a toggle has no "leave alone", so an unset effort (built-in moderate, or a rule naming none) resolves to `effort.when_unset` (`low`), and both the target and `current_effort` are read on the toggle's two-state scale (`on_for` → `high`, `off_for` → `low`; `medium` is off). Output effort on a toggle surface is always `low` or `high`.
 7. **Noop** — target equals current tier and there is no effort change to make (an unknown current effort is not a change) → `noop/already_on_target` (or `upgrade_not_allowed` when step 5 capped it).
 8. **Label** — the target tier's `click_labels` (with overrides). A v2 `action.ui_name` is clicked first; a v1 `ui_name` that the catalog recognises goes **after** the catalog's current labels (v1 seeds are stale), an unrecognised one first. No label for a tier change → `unsupported/no_label_for_tier`. Not needed on `api_proxy`.
 9. **Mode** — `enforce` → `routed`, `suggest` → `suggested`, `observe` → `observed`; `reason` is `upgrade` / `downgrade` / `effort_only`.
@@ -427,7 +427,8 @@ click_labels, model }`, where `result` is one of `routed` | `suggested` | `obser
 * An enforced route pauses the send, clicks the target label(s) until the picker
   reads back the target tier, sets effort through claude.ai's *Effort* submenu when
   the decision carries one (not yet live-verified; the effort actually showing
-  afterwards is what is reported), then re-sends. **There is no fetch-level
+  afterwards is what is reported) — or, on gemini.google.com, the *Extended
+  thinking* toggle in the same menu session (§7.9) — then re-sends. **There is no fetch-level
   fallback** — the old `fetch-blocker.js` body rewrite was removed. The whole
   attempt runs under a 6 s watchdog and ends in the §7.7 invariant.
 * Event `model_routed` — no prompt text, no raw page text: `mechanism: 'browser_extension'`,
@@ -541,3 +542,40 @@ switch to a bigger model, "hi" was never routed down again.
 Pinned by `agent/tests/enforcer-route-held-enter.test.mjs`,
 `agent/tests/enforcer-route-latency.test.mjs` and
 `browser-extension/tests/routing-flow.test.mjs`.
+
+### 7.9 Gemini *Extended thinking* is the effort axis *(2026-10-07)*
+
+Live report (agent 6323ae9): routing switched Gemini's model correctly but never
+touched *Extended thinking*, so the button read "Flash Extended" and complex prompts
+looked like they landed on "flash extended". Gemini's mode menu ends with a
+separator and **Extended thinking / Complex problem solving** — a toggle (checkmark
+when on), independent of the model; the button gains the suffix **Extended** when it
+is on ("Flash Extended", "Pro Extended").
+
+* **Catalog.** `hosts["gemini.google.com"].effort` = `{ supported: true, verified:
+  false, kind: "toggle", toggle_label: "Extended thinking", button_suffix:
+  "Extended", on_for: ["high"], off_for: ["low", "medium"], when_unset: "low" }`.
+  The provider `google` tier flags are unchanged (no `api_proxy` effect).
+* **Decision.** simple → 3.5 Flash-Lite, OFF; moderate → 3.6 Flash, OFF; complex →
+  3.1 Pro, ON. Model right but toggle wrong → `routed / effort_only`; noop only when
+  model **and** toggle match. Claude's effort is unchanged (moderate still leaves it
+  alone; effort-only stays a noop in the desktop enforcer).
+* **Reading.** The button suffix (token boundary, `labelMatches`) → `high` / `low`;
+  in the open menu the row's own state wins when it reports one (UIA Toggle /
+  SelectionItem / the `Selected ` prefix; DOM `aria-checked` / `aria-pressed` /
+  `aria-selected`). Reported as `effort_from` / `effort_to`.
+* **Setting** (desktop web arm `RunWebRoute` → `WebRoutePlan` +
+  `RouteApplyEffortToggle`; extension `setEffortToggleInUI`): after a verified model
+  switch, in the menu the switch left showing (else reopened), or on its own for a
+  toggle-only route. The toggle is clicked **at most once** (a second click undoes the
+  first) and never blind. It is verified by the row or the button suffix (after a
+  300 ms grace the menu is closed and the label read with the overlay gone; 1.5 s
+  bound), and the menu is closed on every path — then the §7.7 gate / refocus / one
+  send. A toggle-only route that cannot set the toggle sends once, unrouted
+  (`sent_unrouted`, reason `effort_toggle_*`); after a landed model switch the route
+  stands and `effort_to` says what applied (desktop reason `effort_toggle_*`,
+  extension `effort_not_applied`).
+
+Pinned by `agent/tests/enforcer-route-effort-toggle.test.mjs`,
+`browser-extension/tests/routing-effort-toggle.test.mjs` and the `gemini-toggle-*`
+decision vectors. **Not yet live-verified** (`effort.verified: false`).

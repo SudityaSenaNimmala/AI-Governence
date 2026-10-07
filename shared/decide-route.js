@@ -22,7 +22,7 @@
 //
 // Spec: docs/MODEL_ROUTING_COMPLEXITY.md section 7.
 
-export const DECIDE_ROUTE_VERSION = '1.0.0';
+export const DECIDE_ROUTE_VERSION = '1.1.0';
 
 export const TIERS = ['economy', 'standard', 'premium'];
 export const EFFORTS = ['low', 'medium', 'high'];
@@ -33,7 +33,8 @@ export const SURFACES = ['browser', 'desktop_app', 'api_proxy'];
 // prompt moves down to economy, a demanding one moves UP to premium.
 export const COMPLEXITY_TIER = { simple: 'economy', moderate: 'standard', complex: 'premium' };
 // Effort follows the same signal where a surface exposes it. Moderate leaves the
-// user's effort alone (null = "do not touch").
+// user's effort alone (null = "do not touch") -- except on a TOGGLE surface
+// (gemini.google.com "Extended thinking"), which has no "alone": see step 6.
 export const COMPLEXITY_EFFORT = { simple: 'low', moderate: null, complex: 'high' };
 
 const TIER_RANK = { economy: 1, standard: 2, premium: 3 };
@@ -266,6 +267,30 @@ function providerTierEffortSupported(catalog, provider, tier) {
   return !!(p && p.tiers && p.tiers[tier] && p.tiers[tier].effort_supported === true);
 }
 
+/**
+ * The surface's effort control when it is a single on/off TOGGLE (catalog
+ * `effort.kind: 'toggle'` -- gemini.google.com's "Extended thinking"), else
+ * null. A toggle is independent of the model, so it can be set on every tier
+ * whatever the provider's per-tier `effort_supported` says.
+ */
+export function toggleEffortCfg(entry) {
+  const e = entry && entry.effort;
+  return e && e.supported === true && lower(e.kind) === 'toggle' ? e : null;
+}
+
+/**
+ * A toggle has two states, reported on the effort scale: ON -> 'high', OFF ->
+ * 'low'. `on_for` / `off_for` list which requested efforts mean which state.
+ * null when the effort is not one the toggle knows.
+ */
+export function toggleEffortLevel(cfg, effort) {
+  const e = normEffort(effort);
+  if (!cfg || !e) return null;
+  if (listIncludes(asList(cfg.on_for), e)) return 'high';
+  if (listIncludes(asList(cfg.off_for), e)) return 'low';
+  return null;
+}
+
 function firstApiId(catalog, provider, tier) {
   const p = catalog && catalog.providers && catalog.providers[provider];
   const ids = asList(p && p.tiers && p.tiers[tier] && p.tiers[tier].api_ids);
@@ -438,7 +463,9 @@ function result(fields) {
  *   4. rule      — first matching enabled rule by priority; else the built-in
  *                  complexity table.
  *   5. cap       — only when allow_upgrade is false: never above user_tier.
- *   6. effort    — dropped (null) where the surface or target tier has no effort control.
+ *   6. effort    — dropped (null) where the surface or target tier has no effort control;
+ *                  on a TOGGLE surface (effort.kind 'toggle') always definite: 'low' (off)
+ *                  or 'high' (on), unset (moderate) -> effort.when_unset.
  *   7. noop      — target == current and no effort change to make.
  *   8. label     — catalog (+overrides) click_labels; a v2 rule ui_name is tried
  *                  first, a v1 ui_name the catalog recognises goes after the
@@ -561,11 +588,22 @@ export function decideRoute(ctx, policy, catalog) {
 
   // 6. effort only where it can actually be set
   const effortCtl = entry.effort && entry.effort.supported === true;
+  const toggle = surface === 'api_proxy' ? null : toggleEffortCfg(entry);
   const effortOk = surface === 'api_proxy'
     ? providerTierEffortSupported(catalog, provider, target)
-    : (effortCtl && providerTierEffortSupported(catalog, provider, target));
+    : (toggle ? true : (effortCtl && providerTierEffortSupported(catalog, provider, target)));
   if (!effortOk) effort = null;
-  const currentEffort = normEffort(c.current_effort);
+  let currentEffort = normEffort(c.current_effort);
+  if (toggle) {
+    // A toggle has no "leave it alone": the built-in moderate (null) -- or a
+    // rule naming no effort -- resolves to the catalog's `when_unset`
+    // (gemini: 'low' = Extended thinking OFF). Both sides are then read on the
+    // toggle's own two-state scale ('low' = off, 'high' = on), so 'medium' and
+    // 'low' are the same state and never a change.
+    if (!effort) effort = normEffort(toggle.when_unset);
+    effort = toggleEffortLevel(toggle, effort);
+    currentEffort = toggleEffortLevel(toggle, currentEffort);
+  }
 
   // 7. nothing to change
   const tierChange = target !== fromTier;

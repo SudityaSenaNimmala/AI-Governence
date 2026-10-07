@@ -57,6 +57,11 @@ export const CONFIRM_DECLINED = Symbol('confirm_declined');
  * @param {object} [o.store]           shared chrome.storage.local contents (pass the same object to share)
  * @param {boolean} [o.featureOn]
  * @param {object} [o.effortMenu]      { levels: { High:'Opus 5 High', ... } } — enables the Effort submenu fake
+ * @param {object} [o.toggleMenu]      Gemini's mode menu with its "Extended thinking" TOGGLE row:
+ *                                     { aria: true  -> the row carries aria-checked,
+ *                                       clickWorks: false -> clicking it changes nothing,
+ *                                       closeOnClick: true -> Material closes the menu on the click }
+ *                                     The toggle state is the button's ' Extended' suffix.
  * @param {boolean} [o.hang]           changeModelInUI never settles (a picker that hangs)
  * @param {boolean} [o.throws]         changeModelInUI throws
  * @param {number} [o.watchdogMs]      ROUTE_WATCHDOG_MS for this flow (default 6000, real time)
@@ -77,7 +82,10 @@ export function loadRoutingFlow(o) {
     store: o.store || {},
     storageListeners: [],
     location: { hostname: o.host, pathname: o.pathname || '/' },
-    button: { textContent: o.buttonText, click() { env.menuState = 'root'; } },
+    button: { textContent: o.buttonText, click() { env.menuState = 'root'; env.menuOpens++; } },
+    menuOpens: 0,
+    toggleClicks: 0,
+    keptOpen: 0,
     menuState: null,
     menuCloses: 0,
     buttonClicks: 0,
@@ -104,6 +112,24 @@ export function loadRoutingFlow(o) {
   const item = (text, onClick) => ({ textContent: text, children: [], click: onClick });
   const menu = {
     querySelectorAll() {
+      if (env.menuState === 'root' && o.toggleMenu) {
+        const on = / Extended$/.test(env.button.textContent);
+        const row = item('Extended thinking Complex problem solving', () => {
+          env.toggleClicks++;
+          if (o.toggleMenu.clickWorks !== false) {
+            const base = env.button.textContent.replace(/ Extended$/, '');
+            env.button.textContent = on ? base : base + ' Extended';
+          }
+          if (o.toggleMenu.closeOnClick) env.menuState = null;
+        });
+        if (o.toggleMenu.aria) row.getAttribute = (a) => (a === 'aria-checked' ? String(/ Extended$/.test(env.button.textContent)) : null);
+        return [
+          item('3.5 Flash-Lite Fastest answers', () => {}),
+          item('3.6 Flash All-around help', () => {}),
+          item('3.1 Pro Advanced reasoning', () => {}),
+          row,
+        ];
+      }
       if (env.menuState === 'root') {
         const cur = (env.button.textContent.split(/\s+/).pop() || '');
         return [
@@ -138,7 +164,7 @@ export function loadRoutingFlow(o) {
     classifyComplexity: (t) => classify(t),
     isFeatureOn: () => o.featureOn !== false,
     emit: (ev) => env.events.push(ev),
-    changeModelInUI: async (label) => {
+    changeModelInUI: async (label, opts) => {
       env.switchCalls.push(label);
       env.menuState = 'root';                       // the picker is open while it switches
       if (o.hang) return new Promise(() => {});     // never settles
@@ -147,8 +173,11 @@ export function loadRoutingFlow(o) {
       // The real changeModelInUI's answer when Claude's "Switch model?" dialog
       // could not be confirmed (and was dismissed): nothing changed.
       if (next === CONFIRM_DECLINED) { env.menuState = null; return 'confirm_declined'; }
-      if (next) env.button.textContent = next;
-      if (!o.menuLeftOpen) env.menuState = null;
+      // Gemini: the toggle survives a model switch (its suffix rides along).
+      if (next) env.button.textContent = o.toggleMenu && / Extended$/.test(env.button.textContent) && !/ Extended$/.test(next) ? next + ' Extended' : next;
+      // keepMenuOpen: the switch landed and the effort toggle uses the menu next.
+      if (next && opts && opts.keepMenuOpen) env.keptOpen++;
+      else if (!o.menuLeftOpen) env.menuState = null;
       // Whatever the user does WHILE the picker switches (edits, navigates).
       if (o.beforeResend && env.composer) o.beforeResend(env.composer, env);
       return !!next;

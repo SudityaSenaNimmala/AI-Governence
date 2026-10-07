@@ -5938,6 +5938,26 @@ public static class CfaiEnforcer
         return DrIsTrue(DrGet(DrObj(DrGet(tiers, tier ?? "")), "effort_supported"));
     }
 
+    // toggleEffortCfg(): the surface's effort control when it is a single
+    // on/off TOGGLE (catalog effort.kind 'toggle' -- gemini's "Extended
+    // thinking"), else null. Model-independent, so settable on every tier.
+    static Dictionary<string, object> DrToggleEffortCfg(DrSurface entry)
+    {
+        if (entry == null || entry.Effort == null) return null;
+        if (!DrIsTrue(DrGet(entry.Effort, "supported"))) return null;
+        return DrLower(DrGet(entry.Effort, "kind")) == "toggle" ? entry.Effort : null;
+    }
+
+    // toggleEffortLevel(): ON -> "high", OFF -> "low", unknown -> null.
+    static string DrToggleEffortLevel(Dictionary<string, object> cfg, object effort)
+    {
+        string e = DrNormEffort(effort);
+        if (cfg == null || e == null) return null;
+        if (DrListIncludes(DrList(DrGet(cfg, "on_for")), e)) return "high";
+        if (DrListIncludes(DrList(DrGet(cfg, "off_for")), e)) return "low";
+        return null;
+    }
+
     static string DrFirstApiId(Dictionary<string, object> catalog, string provider, string tier)
     {
         var ids = DrList(DrGet(DrObj(DrGet(DrProviderTiers(catalog, provider), tier ?? "")), "api_ids"));
@@ -6202,11 +6222,21 @@ public static class CfaiEnforcer
 
         // 6. effort only where it can actually be set
         bool effortCtl = entry.Effort != null && DrIsTrue(DrGet(entry.Effort, "supported"));
+        var toggle = surface == "api_proxy" ? null : DrToggleEffortCfg(entry);
         bool effortOk = surface == "api_proxy"
             ? DrProviderTierEffortSupported(catalog, provider, target)
-            : (effortCtl && DrProviderTierEffortSupported(catalog, provider, target));
+            : (toggle != null ? true : (effortCtl && DrProviderTierEffortSupported(catalog, provider, target)));
         if (!effortOk) effort = null;
         string currentEffort = DrNormEffort(DrGet(c, "current_effort"));
+        if (toggle != null)
+        {
+            // A toggle has no "leave it alone": unset (built-in moderate) ->
+            // the catalog's when_unset; both sides on the toggle's two-state
+            // scale ("low" = off, "high" = on). Lockstep with shared/decide-route.js.
+            if (effort == null) effort = DrNormEffort(DrGet(toggle, "when_unset"));
+            effort = DrToggleEffortLevel(toggle, effort);
+            currentEffort = DrToggleEffortLevel(toggle, currentEffort);
+        }
 
         // 7. nothing to change
         bool tierChange = target != fromTier;
@@ -6519,6 +6549,40 @@ public static class CfaiEnforcer
         return entry != null && entry.Effort != null && DrIsTrue(DrGet(entry.Effort, "supported")) && DrIsTrue(DrGet(entry.Effort, "verified"));
     }
 
+    // The surface's effort TOGGLE config (catalog effort.kind 'toggle' --
+    // gemini.google.com "Extended thinking"), else null.
+    static Dictionary<string, object> MrEffortToggleCfg(string surface, string hostOrApp)
+    {
+        if (_mrCatalog == null) return null;
+        var entry = DrResolveSurface(_mrCatalog, surface, hostOrApp, DrNormalizePolicy(_mrPolicy), null);
+        return DrToggleEffortCfg(entry);
+    }
+
+    // The toggle's state off a picker label: 1 = on (the label carries the
+    // catalog's button_suffix, 'currently Flash Extended'), 0 = off, -1 =
+    // nothing to read. Boundary-matched (DrLabelMatches), never kept.
+    static int ToggleStateOfLabel(string label, string namePrefix, string suffix)
+    {
+        if (string.IsNullOrEmpty(label) || string.IsNullOrEmpty(suffix)) return -1;
+        string body = label.Trim();
+        if (!string.IsNullOrEmpty(namePrefix) && body.StartsWith(namePrefix, StringComparison.OrdinalIgnoreCase))
+            body = body.Substring(namePrefix.Length).Trim();
+        if (body.Length == 0) return -1;
+        return DrLabelMatches(body, suffix) ? 1 : 0;
+    }
+
+    // effort_from / effort_to for a web picker label. A toggle surface reports
+    // its two states on the effort scale ("High" = on, "Low" = off -- the same
+    // closed token set ModelEffortFromLabel returns); every other surface reads
+    // the trailing effort token exactly as before.
+    static string WebEffortFromLabel(string host, string label, string namePrefix)
+    {
+        var cfg = MrEffortToggleCfg("browser", host ?? "");
+        if (cfg == null) return ModelEffortFromLabel(label, namePrefix);
+        int s = ToggleStateOfLabel(label, namePrefix, DrGet(cfg, "button_suffix") as string);
+        return s == 1 ? "High" : (s == 0 ? "Low" : "");
+    }
+
     static string MrLowerEffort(string token)
     {
         string e = (token ?? "").Trim().ToLowerInvariant();
@@ -6534,6 +6598,10 @@ public static class CfaiEnforcer
         public string ChoiceKey = "", ConvKey = "";
         public List<string> ClickLabels = new List<string>();
         public bool EffortVerified;
+        // The decision's effort ("low" / "high" on a toggle surface), "" when
+        // the decision carries none. Read by the web arm's effort TOGGLE step
+        // (gemini "Extended thinking", RouteApplyEffortToggle) and nothing else.
+        public string TargetEffort = "";
     }
 
     static RouteMeta _pendingRouteMeta = null;
@@ -6649,7 +6717,9 @@ public static class CfaiEnforcer
 
     // ONE decision for the pin, shared by the desktop and web arms. Runs the
     // ported decideRoute and then applies the enforcer's own two refinements:
-    //   * an effort-only change is a noop -- there is no effort setter here;
+    //   * an effort-only change is a noop -- there is no effort setter here --
+    //     except on a browser surface whose effort is a TOGGLE (gemini
+    //     "Extended thinking"), which the web arm sets (RouteApplyEffortToggle);
     //   * the result decides what happens to the pin and the note.
     // Returns the decision when a route should be ARMED, else null (the pin is
     // cleared and, where the outcome is reportable, a note is left for the send).
@@ -6673,12 +6743,16 @@ public static class CfaiEnforcer
         meta.FromLabel = MrCatalogLabel(meta.Surface, meta.HostOrApp, d.FromTier);
         meta.ClickLabels = d.ClickLabels;
         meta.EffortVerified = MrEffortVerified(meta.Surface, meta.HostOrApp);
+        meta.TargetEffort = d.Effort ?? "";
         string provider = MrProviderOf(meta.Surface, meta.HostOrApp);
 
-        // An effort-only change has nothing this enforcer may click: no effort
-        // setter exists here, and none of the catalog's effort controls has had
-        // a live pass. Reported as a noop rather than armed.
-        if (d.Result == "routed" && d.Reason == "effort_only")
+        // An effort-only change has nothing this enforcer may click -- EXCEPT
+        // an effort TOGGLE in a browser (gemini "Extended thinking"), which the
+        // web arm sets in the same menu session as a model switch
+        // (RouteApplyEffortToggle). Claude's Effort submenu has no setter here
+        // and no live pass: still a noop rather than armed.
+        bool toggleSettable = meta.Surface == "browser" && MrEffortToggleCfg(meta.Surface, meta.HostOrApp) != null;
+        if (d.Result == "routed" && d.Reason == "effort_only" && !toggleSettable)
         {
             d = new DrDecision { Result = "noop", Reason = meta.EffortVerified ? "effort_setter_absent" : "effort_unverified", FromTier = d.FromTier, TargetTier = d.TargetTier, RuleId = d.RuleId, Model = d.Model };
         }
@@ -7607,7 +7681,7 @@ public static class CfaiEnforcer
         _mrLastObservedKey = dedupKey;
 
         string complexity = ClassifyComplexity(text);
-        string effortFrom = ModelEffortFromLabel(label, webPicker.NamePrefix);
+        string effortFrom = WebEffortFromLabel(_fgWebHost, label, webPicker.NamePrefix);
         // The shared decision (decideRoute port). Anything but 'routed' clears
         // the pin; noop -- including already-on-target -- arms nothing, so the
         // picker is never opened for it.
@@ -7639,7 +7713,7 @@ public static class CfaiEnforcer
                 // from_tier comes from the BUTTON LABEL at pin time
                 // (fromTier:'button_label'), and the effort token rides along for
                 // free out of the same string. Nothing here SETS effort.
-                EffortFrom = ModelEffortFromLabel(label, webPicker.NamePrefix),
+                EffortFrom = WebEffortFromLabel(_fgWebHost, label, webPicker.NamePrefix),
                 LabelBefore = label,
                 NavGen = _browserNavGen,
             };
@@ -8167,7 +8241,7 @@ public static class CfaiEnforcer
         if (provider.Length == 0) provider = snap.Picker.Provider ?? "";
         if (!string.Equals(provider, snap.Picker.Provider, StringComparison.OrdinalIgnoreCase)) { r.Why = "provider_mismatch"; return r; }
         r.Label = label; r.CurTier = curTier; r.Provider = provider;
-        r.EffortFrom = ModelEffortFromLabel(label, snap.Picker.NamePrefix);
+        r.EffortFrom = WebEffortFromLabel(snap.Host, label, snap.Picker.NamePrefix);
         r.FitsRestore = WriteFitsBudget(text);
         r.Meta = new RouteMeta
         {
@@ -10468,6 +10542,264 @@ public static class CfaiEnforcer
         return o.Ok ? cand : null;
     }
 
+    // ════ THE EFFORT TOGGLE (gemini.google.com "Extended thinking") ════════
+    //
+    // Live 2026-10-07 (agent 6323ae9): routing switched Gemini's model
+    // correctly but never touched "Extended thinking", so a complex prompt
+    // landed on "Flash Extended" / a simple one kept thinking on. Gemini's mode
+    // menu ends with a separator and "Extended thinking / Complex problem
+    // solving": a TOGGLE (checkmark when on), independent of the model; the
+    // button label gains the suffix "Extended" when it is on. The catalog
+    // (hosts["gemini.google.com"].effort, kind 'toggle') maps the decision's
+    // effort to it: high -> ON, low / medium -> OFF.
+    //
+    // Pure loop, harness-driven (tests/helpers/route-effort-toggle-harness.ps1).
+    // Rules:
+    //   * the toggle is CLICKED AT MOST ONCE. A second click on a toggle undoes
+    //     the first, so an unverified click is reported, never retried;
+    //   * never clicked blind: with no readable state there is no click;
+    //   * the state is the open menu's item (Toggle / SelectionItem pattern, or
+    //     the declared selected-prefix) when it says anything, else the button
+    //     label's suffix -- the label is what the decision itself read;
+    //   * EVERY path that does not end in the watchdog ends with CloseMenu(): no
+    //     menu is ever left showing for the Enter to land in.
+    class RouteToggleIo
+    {
+        public Func<int> LabelState;      // 1 on / 0 off / -1 unreadable (button label suffix)
+        public Func<int> ItemState;       // 1 / 0 / -1 (the open menu's toggle item)
+        public Func<bool> MenuOpen;       // is the mode menu showing?
+        public Func<bool> OpenMenu;       // expand the picker; false = could not
+        public Func<bool> ActivateItem;   // activate the ONE toggle item; false = not found / no pattern
+        public Func<string> CloseMenu;    // null = no menu showing any more, else why
+        public Action<int> Sleep;
+    }
+
+    class RouteToggleOutcome
+    {
+        public bool Ok;                   // the toggle ends in the wanted state
+        public bool Clicked;              // the toggle item was activated (once)
+        public bool Opened;               // the menu had to be (re)opened for it
+        public string Reason;             // null when Ok
+        public int StateAfter = -1;       // 1 / 0 / -1
+        public string CloseReason;        // null = no menu left showing
+    }
+
+    const int ROUTE_TOGGLE_POLL_MS = 30;
+    const int ROUTE_TOGGLE_VERIFY_MS = 1500;
+
+    static int RouteSafeInt(Func<int> f)
+    {
+        try { return f != null ? f() : -1; } catch (RouteAbandonedException) { throw; } catch { return -1; }
+    }
+
+    static int RouteToggleStateNow(RouteToggleIo io)
+    {
+        bool fromItem;
+        return RouteToggleStateNow(io, out fromItem);
+    }
+
+    static int RouteToggleStateNow(RouteToggleIo io, out bool fromItem)
+    {
+        int item = RouteSafeInt(io.ItemState);
+        fromItem = item == 0 || item == 1;
+        if (fromItem) return item;
+        return RouteSafeInt(io.LabelState);
+    }
+
+    // After the click, while the menu is still showing and its item says
+    // nothing about the state, the label is given this long before the menu is
+    // closed and the label read with the menu gone (Material may re-render the
+    // button only after its overlay closes). Keeps the common Gemini case --
+    // an Invoke-only item -- well inside the route budget.
+    const int ROUTE_TOGGLE_MENU_GRACE_MS = 300;
+
+    static void RouteToggleClose(RouteToggleIo io, RouteToggleOutcome o, ref bool closed)
+    {
+        if (closed) return;
+        closed = true;
+        try { string cr = io.CloseMenu(); o.CloseReason = string.IsNullOrEmpty(cr) ? null : cr; }
+        catch (RouteAbandonedException) { throw; }
+        catch { o.CloseReason = "menu_still_open"; }
+    }
+
+    static RouteToggleOutcome RouteApplyEffortToggle(RouteToggleIo io, bool wantOn)
+    {
+        var o = new RouteToggleOutcome();
+        int want = wantOn ? 1 : 0;
+        bool closed = false;
+        // A closed menu and a label already showing the wanted state: nothing to
+        // open, nothing to click (the decision read the same label).
+        if (!RouteSafeBool(io.MenuOpen) && RouteSafeInt(io.LabelState) == want)
+        {
+            o.Ok = true; o.StateAfter = want;
+            return o;
+        }
+        try
+        {
+            if (!RouteSafeBool(io.MenuOpen))
+            {
+                o.Opened = true;
+                bool opened = false;
+                try { opened = io.OpenMenu(); } catch (RouteAbandonedException) { throw; } catch { opened = false; }
+                if (opened) RouteAwaitMenuItems(io.MenuOpen, io.Sleep, ROUTE_MENU_RENDER_MAX_MS);
+                if (!opened || !RouteSafeBool(io.MenuOpen)) o.Reason = "toggle_menu_not_open";
+            }
+            if (o.Reason == null)
+            {
+                int cur = RouteToggleStateNow(io);
+                if (cur == want) { o.Ok = true; o.StateAfter = cur; }
+                else if (cur < 0) o.Reason = "toggle_state_unknown";
+                else
+                {
+                    bool act = false;
+                    try { act = io.ActivateItem(); } catch (RouteAbandonedException) { throw; } catch { act = false; }
+                    if (!act) { o.Reason = "toggle_item_not_found"; o.StateAfter = cur; }
+                    else
+                    {
+                        o.Clicked = true;
+                        // VERIFY -- never a second click. The menu's item when it
+                        // speaks; else the label, read with the menu gone once the
+                        // grace has passed. A "no" from the ITEM is final.
+                        int s = -1;
+                        bool itemSpoke = false;
+                        for (int waited = 0; ; )
+                        {
+                            s = RouteToggleStateNow(io, out itemSpoke);
+                            if (s == want || waited >= ROUTE_TOGGLE_VERIFY_MS) break;
+                            if (!itemSpoke && !closed && waited >= ROUTE_TOGGLE_MENU_GRACE_MS && RouteSafeBool(io.MenuOpen))
+                            {
+                                RouteToggleClose(io, o, ref closed);
+                                if (o.CloseReason != null) break;   // still showing: reported below, no more reads
+                            }
+                            int step = Math.Min(ROUTE_TOGGLE_POLL_MS, ROUTE_TOGGLE_VERIFY_MS - waited);
+                            io.Sleep(step);
+                            waited += step;
+                        }
+                        o.StateAfter = s;
+                        if (s == want) o.Ok = true;
+                        else o.Reason = "toggle_not_verified";
+                    }
+                }
+            }
+        }
+        catch (RouteAbandonedException) { throw; }   // the watchdog owns the menu now
+        catch (Exception) { o.Ok = false; o.Reason = o.Reason ?? "toggle_exception"; }
+        // NEVER LEAVE THE MENU SHOWING.
+        RouteToggleClose(io, o, ref closed);
+        return o;
+    }
+
+    // What one web route does, from what the pre-flight read:
+    //   "none"         model on target and (no toggle, or the label already
+    //                  shows the wanted toggle state) -- never open the picker
+    //   "model"        switch the model only (no toggle on this surface / no
+    //                  effort in the decision)
+    //   "model+toggle" switch the model, then the toggle in the same menu
+    //                  session (its state is re-read there: a switch can carry it)
+    //   "toggle"       the model is right, the toggle is not: toggle-only route
+    // An unreadable label state (-1) on a toggle-only candidate is "none":
+    // nothing is ever clicked blind.
+    static string WebRoutePlan(bool tierNeeded, bool hasToggle, int labelToggle, bool wantOn)
+    {
+        if (tierNeeded) return hasToggle ? "model+toggle" : "model";
+        if (!hasToggle || labelToggle < 0) return "none";
+        return labelToggle == (wantOn ? 1 : 0) ? "none" : "toggle";
+    }
+
+    // The toggle's UIA state in the open menu: TogglePattern, else
+    // SelectionItemPattern, else the declared selected-prefix on its Name
+    // ('Selected Extended thinking ...'). -1 when none says anything.
+    static int WebToggleItemState(AutomationElement win, WebPicker wp, string toggleLabel)
+    {
+        if (win == null || wp == null || string.IsNullOrEmpty(toggleLabel)) return -1;
+        int n;
+        AutomationElement item = FindWebPickerItemUnique(win, toggleLabel, wp.ItemControlTypes, wp.ItemSelectedPrefix, out n);
+        if (item == null) return -1;
+        try
+        {
+            object p;
+            if (item.TryGetCurrentPattern(TogglePattern.Pattern, out p))
+            {
+                ToggleState ts = ((TogglePattern)p).Current.ToggleState;
+                if (ts == ToggleState.On) return 1;
+                if (ts == ToggleState.Off) return 0;
+            }
+        }
+        catch { }
+        int sel = WebItemSelectionState(item);
+        if (sel == WEB_SEL_YES) return 1;
+        if (sel == WEB_SEL_NO) return 0;
+        string name = null;
+        try { name = item.Current.Name; } catch { }
+        if (!string.IsNullOrEmpty(wp.ItemSelectedPrefix) && name != null
+            && name.TrimStart().StartsWith(wp.ItemSelectedPrefix.Trim(), StringComparison.OrdinalIgnoreCase)) return 1;
+        return -1;
+    }
+
+    // Activate the ONE toggle item, through exactly ONE pattern (a fallthrough
+    // after a pattern that acted would toggle it twice): Toggle, else Invoke,
+    // else Select.
+    static bool WebActivateToggleItem(AutomationElement win, WebPicker wp, string toggleLabel)
+    {
+        if (win == null || wp == null || string.IsNullOrEmpty(toggleLabel)) return false;
+        int n;
+        AutomationElement item = FindWebPickerItemUnique(win, toggleLabel, wp.ItemControlTypes, wp.ItemSelectedPrefix, out n);
+        if (item == null) return false;
+        object p;
+        try
+        {
+            if (item.TryGetCurrentPattern(TogglePattern.Pattern, out p)) { ((TogglePattern)p).Toggle(); return true; }
+            if (item.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); return true; }
+            if (item.TryGetCurrentPattern(SelectionItemPattern.Pattern, out p)) { ((SelectionItemPattern)p).Select(); return true; }
+        }
+        catch { return true; }   // a pattern was called: it may have acted -- never try another
+        return false;
+    }
+
+    // The UIA hands of RouteApplyEffortToggle for a browser window.
+    static RouteToggleOutcome WebApplyEffortToggleUia(IntPtr pinnedHwnd, RouteCtx ctx, string surfaceHost, Dictionary<string, object> cfg, bool wantOn)
+    {
+        AutomationElement win = null;
+        try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+        WebPicker wp = ctx != null ? ctx.Picker : null;
+        string toggleLabel = DrGet(cfg, "toggle_label") as string;
+        string suffix = DrGet(cfg, "button_suffix") as string;
+        List<string> menuLabels = MrAllClickLabels("browser", surfaceHost ?? "");
+        if (!string.IsNullOrEmpty(toggleLabel)) menuLabels.Add(toggleLabel);
+        var io = new RouteToggleIo();
+        io.LabelState = delegate
+        {
+            AutomationElement b = FindWebPickerButton(win, wp);
+            if (b == null) return -1;
+            string l = null;
+            try { l = b.Current.Name; } catch { }
+            return ToggleStateOfLabel(l, wp != null ? wp.NamePrefix : null, suffix);
+        };
+        io.ItemState = delegate { return WebToggleItemState(win, wp, toggleLabel); };
+        io.MenuOpen = delegate { return WebMenuLooksOpen(win, wp, menuLabels); };
+        io.OpenMenu = delegate
+        {
+            if (!RouteOwned() || GetForegroundWindow() != pinnedHwnd) return false;
+            AutomationElement b = FindWebPickerButton(win, wp);
+            if (b == null) return false;
+            object ex;
+            try
+            {
+                if (b.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out ex)) { ((ExpandCollapsePattern)ex).Expand(); return true; }
+            }
+            catch { return false; }
+            return RouteInvokeElement(b);
+        };
+        io.ActivateItem = delegate
+        {
+            if (!RouteOwned() || GetForegroundWindow() != pinnedHwnd) return false;
+            return WebActivateToggleItem(win, wp, toggleLabel);
+        };
+        io.CloseMenu = delegate { return WebCollapseMenuUia(pinnedHwnd, ctx); };
+        io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
+        return RouteApplyEffortToggle(io, wantOn);
+    }
+
     // ════ AI-216: THE WEB ROUTE ═════════════════════════════════════════════
     //
     // A SEPARATE function from RunRoute rather than branches threaded through
@@ -10596,7 +10928,7 @@ public static class CfaiEnforcer
             // Re-read the effort from the FRESH label rather than trusting the
             // pin's copy, so effort_from describes the moment the switch was
             // actually attempted.
-            effortFrom = ModelEffortFromLabel(labelBefore, ctx.Picker.NamePrefix);
+            effortFrom = WebEffortFromLabel(ctx.Host, labelBefore, ctx.Picker.NamePrefix);
             // TIER-ONLY, through the SHARED CATALOG (MrTierOfLabel) exactly as
             // the desktop arm reads it ('Model: Sonnet 5.5 Medium' -> standard);
             // the surface's own button table is the fallback (gemini's
@@ -10605,11 +10937,25 @@ public static class CfaiEnforcer
             string checkTier = WebTierOfLabel(meta, ctx, labelBefore);
             if (checkTier == null || checkTier != fromTier)
             { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "model_changed", composerEl); return; }
-            // ALREADY THERE: never open the picker for a no-op (the desktop
-            // arm's belt to the pin's braces).
-            if (string.Equals(checkTier, toTier, StringComparison.Ordinal))
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "already_on_target", composerEl); return; }
             string surfaceHost = meta != null ? meta.HostOrApp : (ctx.Host ?? "");
+            // THE EFFORT TOGGLE (gemini "Extended thinking"): set in the SAME
+            // menu session as the model switch, or on its own when the model is
+            // already right but the toggle is not (a toggle-only route). Only
+            // on a surface whose catalog effort is a toggle, and only when the
+            // decision carries an effort ("low" = off, "high" = on).
+            Dictionary<string, object> toggleCfg = MrEffortToggleCfg("browser", surfaceHost);
+            string wantEffort = meta != null ? (meta.TargetEffort ?? "") : "";
+            if (wantEffort != "high" && wantEffort != "low") toggleCfg = null;
+            bool toggleWantOn = wantEffort == "high";
+            bool tierNeeded = !string.Equals(checkTier, toTier, StringComparison.Ordinal);
+            string plan = WebRoutePlan(tierNeeded, toggleCfg != null,
+                toggleCfg != null ? ToggleStateOfLabel(labelBefore, ctx.Picker.NamePrefix, DrGet(toggleCfg, "button_suffix") as string) : -1,
+                toggleWantOn);
+            if (plan == "model") toggleCfg = null;
+            // ALREADY THERE -- model AND toggle: never open the picker for a
+            // no-op (the desktop arm's belt to the pin's braces).
+            if (plan == "none")
+            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "already_on_target", composerEl); return; }
 
             RouteCheckpoint("expand");
             object expandObj;
@@ -10630,156 +10976,193 @@ public static class CfaiEnforcer
             RouteAwaitMenuItems(delegate { return WebMenuLooksOpen(win, ctx.Picker, menuLabels); }, delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); }, ROUTE_MENU_RENDER_MAX_MS);
             RouteCheckpoint("find_item");
 
-            // ── PRE-SWITCH CONFIRMATION of the pinned from_tier ─────────────
-            //
-            // A second, independent signal (SelectionItemPattern.IsSelected on
-            // the current model's ITEM), found by the shared catalog's click
-            // labels for the from tier -- ["Sonnet 5.5", "Sonnet 5", "Sonnet"] --
-            // not the surface table's one 2026-09-22 name. The route refuses
-            // ONLY on positive evidence of a mismatch: the item is there and
-            // says it is NOT selected. Not finding it is no evidence (claude.ai
-            // keeps Haiku/Opus inside "More models", so a user ON Haiku has no
-            // top-level item to confirm), and neither is a surface with no
-            // SelectionItemPattern (gemini). The button label read above
-            // through the catalog then stands alone -- exactly what the desktop
-            // arm has always relied on.
-            List<string> fromLabels = MrClickLabelsFor("browser", surfaceHost, fromTier);
-            bool fromAmbiguous = false;
-            AutomationElement fromItem = WebFindTargetItem(win, ctx.Picker, fromLabels, ref fromAmbiguous);
-            if (fromItem != null && WebItemSelectionState(fromItem) == WEB_SEL_NO)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "from_tier_not_confirmed", composerEl); return; }
-
-            // ── THE TARGET ITEM: exactly one, or nothing ───────────────────
-            //
-            // The catalog's labels (+ policy overrides / a rule's ui_name), most
-            // specific first; each must match EXACTLY ONE item, and the first
-            // that does is clicked. Not at the top level -> the desktop arm's
-            // "More models" hover (WebOpenMoreModelsAndFind), then search again.
-            List<string> labels = (meta != null && meta.ClickLabels != null && meta.ClickLabels.Count > 0)
-                ? meta.ClickLabels : new List<string> { toLabel };
-            bool anyAmbiguous = false;
-            AutomationElement targetItem = WebFindTargetItem(win, ctx.Picker, labels, ref anyAmbiguous);
-            if (targetItem == null)
+            string labelAfter = labelBefore;
+            string effortTo = effortFrom;
+            if (tierNeeded)
             {
-                bool openedMore;
-                targetItem = WebOpenMoreModelsAndFind(win, pinnedHwnd, ctx.Picker, labels, ref anyAmbiguous, out openedMore);
-            }
-            if (targetItem == null)
-            {
-                TryCollapsePicker(picker);
-                // ZERO is an ORDINARY runtime path, not an anomaly: model
-                // availability is per ACCOUNT, not per host. TWO OR MORE is a
-                // refusal -- never take the first, because there is no evidence
-                // available to break the tie and the cost of guessing wrong is
-                // that the user is served and billed by a model nobody chose.
-                string why = anyAmbiguous ? "target_item_ambiguous" : "target_item_not_found";
-                WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, why, composerEl);
-                return;
-            }
+                // ── PRE-SWITCH CONFIRMATION of the pinned from_tier ─────────────
+                //
+                // A second, independent signal (SelectionItemPattern.IsSelected on
+                // the current model's ITEM), found by the shared catalog's click
+                // labels for the from tier -- ["Sonnet 5.5", "Sonnet 5", "Sonnet"] --
+                // not the surface table's one 2026-09-22 name. The route refuses
+                // ONLY on positive evidence of a mismatch: the item is there and
+                // says it is NOT selected. Not finding it is no evidence (claude.ai
+                // keeps Haiku/Opus inside "More models", so a user ON Haiku has no
+                // top-level item to confirm), and neither is a surface with no
+                // SelectionItemPattern (gemini). The button label read above
+                // through the catalog then stands alone -- exactly what the desktop
+                // arm has always relied on.
+                List<string> fromLabels = MrClickLabelsFor("browser", surfaceHost, fromTier);
+                bool fromAmbiguous = false;
+                AutomationElement fromItem = WebFindTargetItem(win, ctx.Picker, fromLabels, ref fromAmbiguous);
+                if (fromItem != null && WebItemSelectionState(fromItem) == WEB_SEL_NO)
+                { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "from_tier_not_confirmed", composerEl); return; }
 
-            if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_before_select", composerEl); return; }
-
-            // Recorded BEFORE the click, so the picker change it causes is known
-            // to be ours and never counted as the user's own choice.
-            if (meta != null) MrNoteOurSwitch(meta.ChoiceKey, toTier);
-            // ACTIVATION, as the desktop arm does it: Select() first, then (if
-            // the picker has not switched shortly after) Invoke() on the same
-            // item inside RouteAwaitSwitch. The menu is NOT collapsed until the
-            // wait is over -- collapsing right after a Select() that only
-            // highlighted closes the menu having chosen nothing.
-            RouteCheckpoint("select");
-            bool usedSelect = false, usedInvoke = false;
-            object selObj;
-            if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
-            { try { ((SelectionItemPattern)selObj).Select(); usedSelect = true; } catch { } }
-            if (!usedSelect && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
-            { try { ((InvokePattern)selObj).Invoke(); usedInvoke = true; } catch { } }
-            if (!usedSelect && !usedInvoke)
-            { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "select_failed", composerEl); return; }
-
-            // No fixed settle before the switch wait (was 300ms): see RunRoute.
-
-            // Re-find the button FRESH rather than trusting the cached
-            // reference, and keep re-finding DURING the wait: a stale reference
-            // keeps returning its pre-switch value without ever throwing.
-            AutomationElement verifyEl = FindWebPickerButton(win, ctx.Picker) ?? picker;
-            if (verifyEl != null) { _webPickerCached = verifyEl; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
-            long nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
-
-            // ── THE SWITCH WAIT: the desktop arm's RouteAwaitSwitch ─────────
-            // Same loop, same bounds, same "Switch model?" auto-confirm (the
-            // catalog's hosts["claude.ai"].confirm_dialog; a host without one is
-            // never probed). Its web hands differ only where a browser demands:
-            // the probe walks THIS browser window only (another window of the
-            // same process is another browser window, not a modal), and Escape
-            // goes only into this window.
-            RouteConfirmCfg confirmCfg = MrConfirmDialogCfg("browser", surfaceHost);
-            var confirmButtons = new Dictionary<string, AutomationElement>(StringComparer.OrdinalIgnoreCase);
-            AutomationElement confirmAnchor = null;
-            var io = new RouteSwitchIo();
-            io.ReadLabel = delegate
-            {
-                string l = null;
-                try { l = verifyEl != null ? verifyEl.Current.Name : null; } catch { }
-                if (DateTime.UtcNow.Ticks >= nextRefind || string.IsNullOrEmpty(l))
+                // ── THE TARGET ITEM: exactly one, or nothing ───────────────────
+                //
+                // The catalog's labels (+ policy overrides / a rule's ui_name), most
+                // specific first; each must match EXACTLY ONE item, and the first
+                // that does is clicked. Not at the top level -> the desktop arm's
+                // "More models" hover (WebOpenMoreModelsAndFind), then search again.
+                List<string> labels = (meta != null && meta.ClickLabels != null && meta.ClickLabels.Count > 0)
+                    ? meta.ClickLabels : new List<string> { toLabel };
+                bool anyAmbiguous = false;
+                AutomationElement targetItem = WebFindTargetItem(win, ctx.Picker, labels, ref anyAmbiguous);
+                if (targetItem == null)
                 {
-                    AutomationElement fresh = FindWebPickerButton(win, ctx.Picker);
-                    if (fresh != null) { verifyEl = fresh; _webPickerCached = fresh; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
-                    nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
+                    bool openedMore;
+                    targetItem = WebOpenMoreModelsAndFind(win, pinnedHwnd, ctx.Picker, labels, ref anyAmbiguous, out openedMore);
                 }
-                return l;
-            };
-            // TIER-ONLY, never "the label changed": on this surface the label
-            // carries an effort token that changes as a side effect. A label the
-            // catalog cannot read falls to the item's own IsSelected (claude.ai);
-            // with neither, "" -- never null, so RouteSwitchVerified cannot fall
-            // back to a plain string inequality here.
-            io.TierOf = delegate(string l)
-            {
-                string t = WebTierOfLabel(meta, ctx, l);
-                if (t != null) return t;
-                return WebItemIsSelected(targetItem) ? toTier : "";
-            };
-            io.RetryActivate = delegate
-            {
-                object invObj;
-                try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
-            };
-            io.ProbeConfirm = delegate
-            {
-                confirmButtons.Clear();
-                confirmAnchor = null;
-                return RouteProbeConfirmUia(win, confirmCfg, confirmButtons, ref confirmAnchor);
-            };
-            io.InvokeConfirm = delegate(string name)
-            {
-                AutomationElement b;
-                return confirmButtons.TryGetValue(name, out b) && RouteInvokeElement(b);
-            };
-            io.DismissConfirm = delegate
-            {
-                AutomationElement cancel = RouteFindDialogCancel(confirmAnchor, confirmCfg != null ? confirmCfg.CancelName : null);
-                if (!RouteInvokeElement(cancel))
+                if (targetItem == null)
                 {
-                    // Escape only into THIS browser window -- never another one.
-                    if (GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE);
+                    TryCollapsePicker(picker);
+                    // ZERO is an ORDINARY runtime path, not an anomaly: model
+                    // availability is per ACCOUNT, not per host. TWO OR MORE is a
+                    // refusal -- never take the first, because there is no evidence
+                    // available to break the tie and the cost of guessing wrong is
+                    // that the user is served and billed by a model nobody chose.
+                    string why = anyAmbiguous ? "target_item_ambiguous" : "target_item_not_found";
+                    WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, why, composerEl);
+                    return;
                 }
-                Thread.Sleep(200);
-            };
-            io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
-            io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
 
-            RouteCheckpoint("await_switch");
-            RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
-            string labelAfter = waited.LabelAfter;
-            TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
-            if (!waited.Switched)
-            { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, waited.Reason ?? "switch_not_verified", composerEl); return; }
-            // Captured AFTER the switch, from the same string the tier came
-            // from. "" when the label carried no recognised token.
-            string effortTo = ModelEffortFromLabel(labelAfter, ctx.Picker.NamePrefix);
-            if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
+                if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
+                { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_before_select", composerEl); return; }
+
+                // Recorded BEFORE the click, so the picker change it causes is known
+                // to be ours and never counted as the user's own choice.
+                if (meta != null) MrNoteOurSwitch(meta.ChoiceKey, toTier);
+                // ACTIVATION, as the desktop arm does it: Select() first, then (if
+                // the picker has not switched shortly after) Invoke() on the same
+                // item inside RouteAwaitSwitch. The menu is NOT collapsed until the
+                // wait is over -- collapsing right after a Select() that only
+                // highlighted closes the menu having chosen nothing.
+                RouteCheckpoint("select");
+                bool usedSelect = false, usedInvoke = false;
+                object selObj;
+                if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
+                { try { ((SelectionItemPattern)selObj).Select(); usedSelect = true; } catch { } }
+                if (!usedSelect && targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out selObj))
+                { try { ((InvokePattern)selObj).Invoke(); usedInvoke = true; } catch { } }
+                if (!usedSelect && !usedInvoke)
+                { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "select_failed", composerEl); return; }
+
+                // No fixed settle before the switch wait (was 300ms): see RunRoute.
+
+                // Re-find the button FRESH rather than trusting the cached
+                // reference, and keep re-finding DURING the wait: a stale reference
+                // keeps returning its pre-switch value without ever throwing.
+                AutomationElement verifyEl = FindWebPickerButton(win, ctx.Picker) ?? picker;
+                if (verifyEl != null) { _webPickerCached = verifyEl; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
+                long nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
+
+                // ── THE SWITCH WAIT: the desktop arm's RouteAwaitSwitch ─────────
+                // Same loop, same bounds, same "Switch model?" auto-confirm (the
+                // catalog's hosts["claude.ai"].confirm_dialog; a host without one is
+                // never probed). Its web hands differ only where a browser demands:
+                // the probe walks THIS browser window only (another window of the
+                // same process is another browser window, not a modal), and Escape
+                // goes only into this window.
+                RouteConfirmCfg confirmCfg = MrConfirmDialogCfg("browser", surfaceHost);
+                var confirmButtons = new Dictionary<string, AutomationElement>(StringComparer.OrdinalIgnoreCase);
+                AutomationElement confirmAnchor = null;
+                var io = new RouteSwitchIo();
+                io.ReadLabel = delegate
+                {
+                    string l = null;
+                    try { l = verifyEl != null ? verifyEl.Current.Name : null; } catch { }
+                    if (DateTime.UtcNow.Ticks >= nextRefind || string.IsNullOrEmpty(l))
+                    {
+                        AutomationElement fresh = FindWebPickerButton(win, ctx.Picker);
+                        if (fresh != null) { verifyEl = fresh; _webPickerCached = fresh; _webPickerHwnd = pinnedHwnd; _webPickerHost = ctx.Host ?? ""; }
+                        nextRefind = DateTime.UtcNow.Ticks + TimeSpan.FromMilliseconds(250).Ticks;
+                    }
+                    return l;
+                };
+                // TIER-ONLY, never "the label changed": on this surface the label
+                // carries an effort token that changes as a side effect. A label the
+                // catalog cannot read falls to the item's own IsSelected (claude.ai);
+                // with neither, "" -- never null, so RouteSwitchVerified cannot fall
+                // back to a plain string inequality here.
+                io.TierOf = delegate(string l)
+                {
+                    string t = WebTierOfLabel(meta, ctx, l);
+                    if (t != null) return t;
+                    return WebItemIsSelected(targetItem) ? toTier : "";
+                };
+                io.RetryActivate = delegate
+                {
+                    object invObj;
+                    try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
+                };
+                io.ProbeConfirm = delegate
+                {
+                    confirmButtons.Clear();
+                    confirmAnchor = null;
+                    return RouteProbeConfirmUia(win, confirmCfg, confirmButtons, ref confirmAnchor);
+                };
+                io.InvokeConfirm = delegate(string name)
+                {
+                    AutomationElement b;
+                    return confirmButtons.TryGetValue(name, out b) && RouteInvokeElement(b);
+                };
+                io.DismissConfirm = delegate
+                {
+                    AutomationElement cancel = RouteFindDialogCancel(confirmAnchor, confirmCfg != null ? confirmCfg.CancelName : null);
+                    if (!RouteInvokeElement(cancel))
+                    {
+                        // Escape only into THIS browser window -- never another one.
+                        if (GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE);
+                    }
+                    Thread.Sleep(200);
+                };
+                io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
+                io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
+
+                RouteCheckpoint("await_switch");
+                RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
+                labelAfter = waited.LabelAfter;
+                // Best-effort -- selecting usually closes it on its own. NOT when the
+                // effort toggle comes next: it uses the menu if it is still showing
+                // (the same menu session) and reopens it only if it is not.
+                if (toggleCfg == null) TryCollapsePicker(picker);
+                if (!waited.Switched)
+                { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, waited.Reason ?? "switch_not_verified", composerEl); return; }
+                // Captured AFTER the switch, from the same string the tier came
+                // from. "" when the label carried no recognised token.
+                effortTo = WebEffortFromLabel(ctx.Host, labelAfter, ctx.Picker.NamePrefix);
+                if (meta != null) MrNoteRouted(meta.ChoiceKey, meta.ConvKey, toTier);
+            }
+
+            // ── THE EFFORT TOGGLE, same menu session ──────────────────────
+            // After a verified model switch (a switch can carry the toggle with
+            // it, so the state is read again, never assumed), or on its own for
+            // a toggle-only route. At most ONE click; the menu is closed by it
+            // on every path. A toggle-only route that cannot set the toggle is
+            // a mechanical failure like any other: the prompt goes out once,
+            // unrouted. After a model switch that DID land, the route stands
+            // and the send goes ahead; effort_to says what actually applied.
+            string effortWhy = null;
+            if (toggleCfg != null)
+            {
+                RouteCheckpoint("effort_toggle");
+                RouteToggleOutcome tog = WebApplyEffortToggleUia(pinnedHwnd, ctx, surfaceHost, toggleCfg, toggleWantOn);
+                if (tog.StateAfter == 1) effortTo = "High";
+                else if (tog.StateAfter == 0) effortTo = "Low";
+                else
+                {
+                    string fresh = null;
+                    try { AutomationElement b = FindWebPickerButton(win, ctx.Picker); if (b != null) fresh = b.Current.Name; } catch { }
+                    if (!string.IsNullOrEmpty(fresh)) effortTo = WebEffortFromLabel(ctx.Host, fresh, ctx.Picker.NamePrefix);
+                }
+                if (!tog.Ok)
+                {
+                    effortWhy = "effort_" + (tog.Reason ?? "toggle_not_verified");
+                    if (!tierNeeded)
+                    { WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, effortWhy, composerEl); return; }
+                }
+            }
 
             // ── The switch landed. Never leave a menu showing: a submenu or the
             // menu itself still open would take the Enter. ─────────────────
@@ -10831,7 +11214,7 @@ public static class CfaiEnforcer
                     WebRouteFailed(provider, toTier /* now-current */, toTier, toLabel, complexity, effortFrom, effortTo, "focus_lost_after_switch_" + afterWhy);
                     return;
                 }
-                WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, focused, originalText, effortFrom, effortTo, null);
+                WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, focused, originalText, effortFrom, effortTo, effortWhy);
                 return;
             }
 
@@ -10878,7 +11261,7 @@ public static class CfaiEnforcer
                 _mrLastObservedKey = "";
                 return;
             }
-            WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, composerEl, originalText, effortFrom, effortTo, "restored");
+            WebSendAndReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, composerEl, originalText, effortFrom, effortTo, effortWhy == null ? "restored" : "restored_" + effortWhy);
         }
         catch (RouteAbandonedException)
         {

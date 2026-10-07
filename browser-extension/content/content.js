@@ -1272,6 +1272,15 @@
   const EFFORT_TOKENS = { low: 'low', medium: 'medium', high: 'high' };
   function effortFromButtonText(text, entry) {
     if (!entry || !entry.effort || entry.effort.supported !== true) return null;
+    // An effort TOGGLE (gemini.google.com "Extended thinking"): the button
+    // gains the catalog's suffix when it is on ('Flash Extended'). Reported on
+    // the effort scale -- on 'high', off 'low' -- exactly as decideRoute reads it.
+    const tcfg = toggleEffortCfgOf(entry);
+    if (tcfg) {
+      const suffix = String(tcfg.button_suffix || '');
+      if (!suffix || !String(text || '').trim()) return null;
+      return ROUTING.labelMatches(text, suffix) ? 'high' : 'low';
+    }
     const parts = String(text || '').trim().split(/\s+/).filter(Boolean);
     if (parts.length < 2) return null;
     return EFFORT_TOKENS[parts[parts.length - 1].toLowerCase()] || null;
@@ -1427,11 +1436,17 @@
    *  Success is judged by READING THE TIER BACK, not by "the click happened". */
   async function switchToTier(r) {
     const d = r.decision;
+    // An effort toggle comes next (gemini "Extended thinking"): a switch that
+    // lands leaves the menu showing for it -- the same menu session.
+    const keepMenuOpen = !!(d.effort && toggleEffortCfgOf(r.entry));
     for (const label of d.click_labels || []) {
       let res = false;
-      try { res = await changeModelInUI(label); } catch {}
+      try { res = await changeModelInUI(label, { keepMenuOpen }); } catch {}
       const after = readPickerState();
       if (after && after.tier === d.target_tier) return { ok: true, label };
+      // Not the target after all: a menu kept for the toggle is closed before
+      // the next label reopens it.
+      if (keepMenuOpen) { try { await closeOpenMenus(); } catch {} }
       // Claude put up its "Switch model?" dialog and it could not be confirmed
       // (it has been dismissed). Trying the next label would only reopen it.
       if (res === SWITCH_CONFIRM_DECLINED) return { ok: false, label: null, reason: 'confirm_dialog_not_confirmed' };
@@ -1508,6 +1523,131 @@
       await closeMenus();
     }
     return readPickerState()?.effort || null;
+  }
+
+  // ── The effort TOGGLE (gemini.google.com "Extended thinking") ───────────
+  //
+  // Live 2026-10-07: routing switched Gemini's model but never touched
+  // "Extended thinking", so complex prompts looked like they landed on "Flash
+  // Extended". Gemini's mode menu ends with a separator and "Extended thinking
+  // / Complex problem solving" -- a TOGGLE (checkmark when on), independent of
+  // the model; the button gains the suffix "Extended" when it is on. The
+  // catalog (effort.kind 'toggle') makes it the effort axis: high ON, low OFF.
+  // Same rules as the desktop agent's RouteApplyEffortToggle:
+  //   * clicked AT MOST ONCE (a second click undoes the first) -- an
+  //     unverified click is reported through effort_to, never retried;
+  //   * never clicked blind (no readable state -> no click);
+  //   * state = the menu item's aria-checked / aria-pressed / aria-selected
+  //     when it says anything, else the button suffix;
+  //   * the menu is closed on every path.
+  const TOGGLE_VERIFY_MS = 1500;
+  const TOGGLE_MENU_GRACE_MS = 300;
+  const TOGGLE_POLL_MS = 30;
+  const TOGGLE_ITEM_SELECTOR = '[role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="switch"], [role="checkbox"], button, li';
+
+  function toggleEffortCfgOf(entry) {
+    const e = entry && entry.effort;
+    return e && e.supported === true && String(e.kind || '').toLowerCase() === 'toggle' ? e : null;
+  }
+
+  /** The toggle's row in a showing menu (shortest matching text), or null. Its
+   *  presence is also the "the mode menu is showing" signal for this step. */
+  function findToggleItem(label) {
+    const want = String(label || '').trim().toLowerCase();
+    if (!want) return null;
+    let best = null;
+    for (const menu of document.querySelectorAll(MENU_CONTAINER_SELECTOR)) {
+      if (!isVisibleEl(menu)) continue;
+      for (const el of menu.querySelectorAll(TOGGLE_ITEM_SELECTOR)) {
+        const t = (el.textContent || '').trim();
+        if (!t || t.length > 120 || t.toLowerCase().indexOf(want) !== 0) continue;
+        if (!isVisibleEl(el)) continue;
+        if (!best || t.length < (best.textContent || '').trim().length) best = el;
+      }
+    }
+    return best;
+  }
+
+  /** 1 on, 0 off, -1 the row says nothing (no aria state on it or inside it). */
+  function toggleItemState(el) {
+    if (!el) return -1;
+    const read = (node) => {
+      if (!node || typeof node.getAttribute !== 'function') return -1;
+      for (const a of ['aria-checked', 'aria-pressed', 'aria-selected']) {
+        const v = node.getAttribute(a);
+        if (v === 'true') return 1;
+        if (v === 'false') return 0;
+      }
+      return -1;
+    };
+    const own = read(el);
+    if (own >= 0) return own;
+    try {
+      const inner = typeof el.querySelector === 'function'
+        ? el.querySelector('[aria-checked], input[type="checkbox"]') : null;
+      if (inner) {
+        const v = read(inner);
+        if (v >= 0) return v;
+        if (typeof inner.checked === 'boolean') return inner.checked ? 1 : 0;
+      }
+    } catch {}
+    return -1;
+  }
+
+  /**
+   * Set the effort toggle to `level` ('high' = on, 'low' = off) -- in the menu
+   * a model switch left showing (the same menu session), else by opening it.
+   * Returns the effort that actually applies afterwards ('high' / 'low' / null).
+   */
+  async function setEffortToggleInUI(entry, level) {
+    const cfg = toggleEffortCfgOf(entry);
+    const fromLabel = () => { const st = readPickerState(); return st ? st.effort : null; };
+    if (!cfg || (level !== 'high' && level !== 'low')) return fromLabel();
+    const label = String(cfg.toggle_label || '');
+    const cancelled = routeCancelToken();
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const stateNow = () => {
+      const s = toggleItemState(findToggleItem(label));
+      if (s === 1) return { v: 'high', item: true };
+      if (s === 0) return { v: 'low', item: true };
+      return { v: fromLabel(), item: false };
+    };
+    // Menu closed and the button already shows it: nothing to open or click.
+    if (!findToggleItem(label) && fromLabel() === level) return level;
+    let verifiedByItem = false;
+    try {
+      if (!findToggleItem(label)) {
+        const btn = getModelButton();
+        if (!btn) return fromLabel();
+        btn.click();
+        await waitForEl(() => findToggleItem(label), 600, TOGGLE_POLL_MS);
+      }
+      const item = cancelled() ? null : findToggleItem(label);
+      if (item) {
+        const before = stateNow();
+        if (before.v === level) {
+          verifiedByItem = before.item;
+        } else if (before.v === 'high' || before.v === 'low') {   // never blind
+          item.click();                                            // ONCE
+          let closed = false;
+          for (let waited = 0; ; waited += TOGGLE_POLL_MS) {
+            const s = stateNow();
+            if (s.v === level) { verifiedByItem = s.item; break; }
+            if (waited >= TOGGLE_VERIFY_MS || cancelled()) break;
+            // The row says nothing: give the label a moment, then close the
+            // menu and read the label with the overlay gone.
+            if (!s.item && !closed && waited >= TOGGLE_MENU_GRACE_MS && findToggleItem(label)) {
+              await closeOpenMenus();
+              closed = true;
+            }
+            await sleep(TOGGLE_POLL_MS);
+          }
+        }
+      }
+    } catch {}
+    try { await closeOpenMenus(); } catch {}
+    _modelBtnCache = null;
+    return verifiedByItem ? level : fromLabel();
   }
 
   function showSuggestionToast(fromLabel, toLabel, ruleName) {
@@ -1605,7 +1745,11 @@
         if (sw.reason) failReason = sw.reason;
       }
       let effortTo = null;
-      if (tierOk && d.effort) effortTo = await setEffortInUI(r.entry, d.effort);
+      if (tierOk && d.effort) {
+        effortTo = toggleEffortCfgOf(r.entry)
+          ? await setEffortToggleInUI(r.entry, d.effort)   // gemini "Extended thinking"
+          : await setEffortInUI(r.entry, d.effort);        // claude.ai Effort submenu
+      }
       return { tierOk, label, effortTo, failReason };
     })().catch(() => ({ tierOk: false, label: d.to_label, effortTo: null, failReason: 'exception' }));
     // THE WATCHDOG. A switch that never settles (a picker that hangs, a promise
@@ -2039,7 +2183,12 @@
   }
   // ── end model-menu option lookup ─
 
-  async function changeModelInUI(targetModelId) {
+  // opts.keepMenuOpen: a switch that LANDS leaves the menu showing, because
+  // the effort toggle is set next in the same menu session (gemini "Extended
+  // thinking", setEffortToggleInUI) -- which closes it. A failed switch always
+  // closes it here.
+  async function changeModelInUI(targetModelId, opts) {
+    const keepMenuOpen = !!(opts && opts.keepMenuOpen);
     const btn = getModelButton();
     if (!btn) { console.warn('[cfai] model button not found'); return false; }
     // The route that started this switch may be abandoned by its watchdog
@@ -2146,7 +2295,9 @@
     const newText = newBtn ? (newBtn.textContent || '').trim() : '';
     // An item click that switched the model but left its menu (or a submenu)
     // showing must not leave it there: the re-sent Enter would land in it.
-    if (anyModelMenuOpen()) await closeOpenMenus();
+    // (keepMenuOpen: the effort toggle uses it next, and closes it after.)
+    const landed = newText.includes(targetText) || (!!newText && newText !== btnText);
+    if (anyModelMenuOpen() && !(keepMenuOpen && landed)) await closeOpenMenus();
     if (newText.includes(targetText)) {
       clog('[cfai] ✓ model changed:', btnText, '→', newText);
       return true;
