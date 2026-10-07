@@ -349,14 +349,11 @@ test('Electron main.js passes the per-machine model-routing toggle to the monito
   assert.match(src, /CFAI_MODEL_ROUTER_ENABLED:\s*modelRoutingEnabled \? 'true' : 'false'/);
 });
 
-test('Enforcer always sends CFAI_MODEL_ROUTER_ENABLED and the router config (as a file)', async () => {
+test('Enforcer always sends CFAI_MODEL_ROUTER_ENABLED and CFAI_MODEL_ROUTER_CONFIG', async () => {
   const src = await readFile(join(AGENT_DIR, 'src', 'os_monitor', 'enforcer.js'), 'utf8');
   // Inherits the parent's per-machine toggle; defaults on for bare agent mode.
   assert.match(src, /CFAI_MODEL_ROUTER_ENABLED:\s*process\.env\.CFAI_MODEL_ROUTER_ENABLED \|\| 'true'/);
-  // The payload outgrew Windows' 32,767-char env-var limit: it goes in a file
-  // written from buildModelRouterConfig(), and only the path goes in env.
-  assert.match(src, /CFAI_MODEL_ROUTER_CONFIG_FILE:\s*routerConfigFile/);
-  assert.match(src, /writeFileSync\(path, JSON\.stringify\(buildModelRouterConfig\(\)\)/);
+  assert.match(src, /CFAI_MODEL_ROUTER_CONFIG:\s*JSON\.stringify\(buildModelRouterConfig\(\)\)/);
   assert.equal(/modelRouterEnabled/.test(src), false, 'no per-instance flag should gate this any more');
 });
 

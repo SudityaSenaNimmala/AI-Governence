@@ -133,17 +133,7 @@ $hbPath = if ($env:CFAI_ENFORCER_HEARTBEAT) { $env:CFAI_ENFORCER_HEARTBEAT } els
 # categories, and re-flattening a nested shape by hand here would just move
 # the parsing problem rather than solve it.
 $modelRouterEnabled = ($env:CFAI_MODEL_ROUTER_ENABLED -eq 'true')
-# The payload now arrives in a FILE (CFAI_MODEL_ROUTER_CONFIG_FILE): it outgrew
-# Windows' 32,767-char environment-variable limit, which made the spawn fail.
-# The env-var form is still accepted for older parents.
-$mrConfigJson = ''
-if ($modelRouterEnabled) {
-    if ($env:CFAI_MODEL_ROUTER_CONFIG_FILE -and (Test-Path -LiteralPath $env:CFAI_MODEL_ROUTER_CONFIG_FILE)) {
-        try { $mrConfigJson = [System.IO.File]::ReadAllText($env:CFAI_MODEL_ROUTER_CONFIG_FILE, [System.Text.Encoding]::UTF8) } catch { $mrConfigJson = '' }
-    } elseif ($env:CFAI_MODEL_ROUTER_CONFIG) {
-        $mrConfigJson = $env:CFAI_MODEL_ROUTER_CONFIG
-    }
-}
+$mrConfigJson = if ($modelRouterEnabled -and $env:CFAI_MODEL_ROUTER_CONFIG) { $env:CFAI_MODEL_ROUTER_CONFIG } else { '' }
 
 # IDE-hosted AI panels. Same treatment as CFAI_MODEL_ROUTER_CONFIG directly
 # above (passed through UNPARSED, deserialized on the C# side with
