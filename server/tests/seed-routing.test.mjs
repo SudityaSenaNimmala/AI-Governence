@@ -13,8 +13,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { seedDefaultRoutingRules, DEFAULT_RULES, isPristineV1Builtin } from '../src/seed-routing.js';
-import { inferTier, toLegacyView } from '../src/lib/routing-schema.js';
+import { seedDefaultRoutingRules, DEFAULT_RULES, isPristineV1Builtin, migrateRoutingSettings } from '../src/seed-routing.js';
+import { inferTier, toLegacyView, DEFAULT_SETTINGS, SETTINGS_REV } from '../src/lib/routing-schema.js';
 import { createFakeDb } from './helpers/fake-db.mjs';
 
 const rowsOf = (db) => db._rows('routing_rules');
@@ -255,4 +255,45 @@ test('the legacy /rules view gives a v2 built-in a clickable v1 label and model'
   assert.equal(withOverride.action.ui_name, 'Haiku 5');
   const observe = toLegacyView({ ...byKey(db, 'anthropic:simple'), mode: 'observe' }, []);
   assert.equal(observe.enabled, false, 'a v1 client would ENFORCE an observe-only rule');
+});
+
+// ── routing_settings: respect_user_override became opt-in (2026-10-07) ──────
+//
+// Live: a user manually picked a bigger model, and every later "hi"/"hello" in
+// that conversation went out unrouted — the manual switch stood routing down
+// for the whole conversation because respect_user_override defaulted to true.
+
+const settingsOf = (db) => db._rows('routing_settings');
+
+test('settings migration: no settings doc -> nothing written, the new default (false) applies', async () => {
+  const db = createFakeDb();
+  const r = await migrateRoutingSettings(db);
+  assert.deepEqual(r, { flipped: false, stamped: false });
+  assert.equal(settingsOf(db).length, 0);
+  assert.equal(DEFAULT_SETTINGS.respect_user_override, false);
+  assert.equal(DEFAULT_SETTINGS.allow_upgrade, true);
+});
+
+test('settings migration: a pre-flip doc carrying the old default true is flipped once and stamped', async () => {
+  const db = createFakeDb();
+  // What PUT { allow_upgrade: false } used to persist: every key, defaults filled in.
+  await db.collection('routing_settings').insertOne({ id: 'default', allow_upgrade: false, respect_user_override: true });
+  const r = await migrateRoutingSettings(db);
+  assert.deepEqual(r, { flipped: true, stamped: true });
+  const doc = settingsOf(db)[0];
+  assert.equal(doc.respect_user_override, false);
+  assert.equal(doc.allow_upgrade, false, 'the admin\'s real choice is untouched');
+  assert.equal(doc.settings_rev, SETTINGS_REV);
+  // Idempotent: a stamped doc is never touched again -- including an admin who
+  // turns respect_user_override back ON after the migration.
+  await db.collection('routing_settings').updateOne({ id: 'default' }, { $set: { respect_user_override: true } });
+  assert.deepEqual(await migrateRoutingSettings(db), { flipped: false, stamped: false });
+  assert.equal(settingsOf(db)[0].respect_user_override, true);
+});
+
+test('settings migration: a pre-flip doc already false is only stamped', async () => {
+  const db = createFakeDb();
+  await db.collection('routing_settings').insertOne({ id: 'default', allow_upgrade: true, respect_user_override: false });
+  assert.deepEqual(await migrateRoutingSettings(db), { flipped: false, stamped: true });
+  assert.equal(settingsOf(db)[0].respect_user_override, false);
 });

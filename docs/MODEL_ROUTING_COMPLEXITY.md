@@ -292,8 +292,9 @@ Verified against the shipped classifier.
 6. **Routing goes both ways.** A demanding prompt is moved UP to premium even when
    the user picked a cheaper model (`allow_upgrade`, default on). An admin who turns
    `allow_upgrade` off caps every route at the tier the *user* last chose themselves
-   (§7.4). If the user switches the model back after a route, that conversation is
-   left alone (`respect_user_override`, default on).
+   (§7.4). If the user switches the model by hand, that pick becomes the current
+   model and the next prompt is routed from it; only `respect_user_override: true`
+   (default **off** since 2026-10-07) leaves that conversation alone instead.
 7. **Whole-product builds are a phrase shape, not comprehension (1.5.0).** The
    product list is finite: an unlisted product is caught only as "clone of" + a
    Capitalised name, so a lower-case unlisted name stays `moderate`. A verb and a
@@ -358,7 +359,7 @@ do about it**, for every engine:
 |---|---|
 | `shared/model-catalog.json` | Per **provider** × tier: `api_ids`, `effort_supported`. Per **host** (claude.ai, chatgpt.com, gemini.google.com, aistudio.google.com, perplexity.ai, chat.mistral.ai) and per **desktop app** (`claude_desktop`, `chatgpt_desktop`) × tier: `click_labels` (what to click, most specific first) and `button_label_patterns` (how to read the current tier off the picker button), plus `effort` and `picker` metadata. `verified: true` only where a live pass is recorded in code (`evidence`). |
 | `shared/decide-route.js` | `decideRoute(ctx, policy, catalog)` — pure, no I/O, no imports, JSON in/out. |
-| `shared/routing-decision-vectors.json` | 74 decision cases + 24 label-reading cases. **The contract.** The extension bundle and the desktop enforcer's C# port must both pass all of them. |
+| `shared/routing-decision-vectors.json` | 80 decision cases + 30 label-reading cases. **The contract.** The extension bundle and the desktop enforcer's C# port must both pass all of them. |
 | `browser-extension/content/model-routing.js` | **Generated** classic-script bundle of the two above (`node scripts/gen-shared-routing.mjs`), publishing `window.__cfaiRouting`. A test fails if it drifts. |
 
 ### 7.1 Label matching
@@ -397,7 +398,7 @@ click_labels, model }`, where `result` is one of `routed` | `suggested` | `obser
 ### 7.4 The order — fixed, pinned by the vectors
 
 1. **Disabled** — `policy.fleet_enabled` or `ctx.fleet_enabled` false → `fleet_disabled`; `ctx.machine_enabled` false → `machine_disabled`.
-2. **User override** — `ctx.user_override` and `respect_user_override` (default true) → `user_override`. Checked before anything is read from the page.
+2. **User override** — `ctx.user_override` and `respect_user_override` → `user_override`. Checked before anything is read from the page. **Opt-in since 2026-10-07:** only an explicit `true` counts; missing settings, a null policy or a legacy v1 array all route on. The server default is `false`, and a pre-flip `routing_settings` doc is migrated once (`migrateRoutingSettings`, stamped `settings_rev`).
 3. **Surface** — no catalog entry (after overrides) → `unsupported/unknown_surface`; ctx provider ≠ catalog provider → `provider_mismatch`; picker tier unreadable → `current_tier_unknown`.
 4. **Rule** — enabled rules by ascending `priority` (default 50), ties in document order; the first whose scope (`surfaces`, `hosts` ∪ `apps`) and conditions (`provider`, `complexity`, `current_tier`) all match wins. **A rule with a `sensitivity` condition only ever matches on `api_proxy`** — on browser/desktop it is skipped, not applied with the condition ignored. `set_tier` → `target_tier` (else the tier of its `ui_name`/`model`, else built-in); `cap_tier` → min(built-in, cap); `suggest` → mode `suggest`; `none` → `noop/rule_action_none`. A v1 rule's target is the catalog tier of its `ui_name` (or its model id's tier), else the built-in. **No rule** → built-in: `simple → economy`, `moderate → standard`, `complex → premium`; `unknown` → `noop/unknown_complexity`.
 5. **Cap** — only when `allow_upgrade` is **false**: the target is capped at `user_tier` (else `current_tier`). Default is true: upgrades above the user's model are intended.
@@ -415,8 +416,14 @@ click_labels, model }`, where `result` is one of `routed` | `suggested` | `obser
 * Current tier is read from the picker button through the catalog patterns. The
   user's own choice is tracked per **(host, provider)** (`cfai.routing_user_choice`)
   and is set **only** by a picker change the extension did not make — never by its
-  own routes. A user change after a route suppresses routing for that tab's
-  conversation and is reported once as `user_override`.
+  own routes. A user change after a route is the new current model; the next
+  prompt is routed from it. Only with `respect_user_override: true` does it
+  suppress routing for that tab's conversation (reported once as `user_override`).
+* The decision is made **synchronously at send time from the live composer
+  text**, and a route only runs when that send can be held: an event the page
+  cannot cancel is never routed (`unsupported/send_not_pausable`, once per page
+  load), and every other send event while a route is in flight (the click after
+  the paused pointerdown, a second Enter) is swallowed — one switch, one send.
 * An enforced route pauses the send, clicks the target label(s) until the picker
   reads back the target tier, sets effort through claude.ai's *Effort* submenu when
   the decision carries one (not yet live-verified; the effort actually showing
@@ -496,3 +503,41 @@ How:
 
 Pinned by `agent/tests/enforcer-route-watchdog.test.mjs` and
 `browser-extension/tests/routing-watchdog.test.mjs`.
+
+### 7.8 Never send before the decision *(2026-10-07)*
+
+Live report (Gemini in Edge, desktop agent web arm): "there is a lag for each
+model routing change" / "it changed after the prompt was sent", and after a manual
+switch to a bigger model, "hi" was never routed down again.
+
+* **The hook knows which text a decision is for.** The keyboard hook keeps a
+  composer *edit sequence* (one `Interlocked` increment per key that can change
+  the text; never the key). The poll thread reads it *before* the text and records
+  it on its pin (`_pendingRouteSeq`) or on a no-route decision (`_mrDecidedSeq`).
+  At Enter (`RouteEnterPlan`): a pin for exactly this sequence → the pinned route;
+  a no-route decision for exactly this one → the Enter passes; anything else on a
+  routing-eligible composer → **held**: the hook swallows the Enter and a route
+  run (`RunHeldEnter`, under the same 6 s `RouteRun` watchdog) reads the live
+  composer (two reads 30 ms apart must agree), classifies, decides, and then routes
+  + sends, or sends once unrouted through the same gate (`HeldSendUnrouted`), or —
+  nothing readable — puts the user's own Enter back (`HeldReleaseEnter`). Budget
+  400 ms (classifier ≈ 0.3–1.5 ms warm); past it the prompt goes out unrouted. The
+  hook itself still does no UIA and no classify.
+* **A pin is used only for the text it was decided for.** `RunPinnedRoute`
+  re-decides when the composer no longer holds the pinned text (a mouse paste, a
+  lagging accessibility read) instead of failing `composer_lost` with nothing sent.
+* **Never route a submitted prompt.** Every send records what it carried; the
+  user's own Enter drops the pin it did not take; an empty composer drops any pin;
+  a read of the just-sent text with no key since is never pinned.
+* **No fixed waits on the route path.** Expand → items is polled (was 150 ms),
+  Select → switch wait has no settle (was 300 ms), the switch label is re-read
+  every 30 ms (was 60), Collapse/Escape are polled closed (were 80/120 ms), and the
+  post-send read exits as soon as the composer empties (was a flat 1.5 s on the
+  web, which is why `model_routed` landed 1.5 s after its own send). Harness
+  (`route-latency-harness.ps1`, typical Gemini switch): Enter → send waiting 800 ms
+  → 340 ms; Enter → report 2300 ms → 490 ms (web). The gate's one 150 ms settle
+  re-check (§7.7) is unchanged.
+
+Pinned by `agent/tests/enforcer-route-held-enter.test.mjs`,
+`agent/tests/enforcer-route-latency.test.mjs` and
+`browser-extension/tests/routing-flow.test.mjs`.

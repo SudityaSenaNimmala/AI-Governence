@@ -5625,7 +5625,8 @@ public static class CfaiEnforcer
     {
         public List<Dictionary<string, object>> Rules = new List<Dictionary<string, object>>();
         public List<object> CatalogOverrides = new List<object>();
-        public bool AllowUpgrade = true, RespectUserOverride = true, FleetEnabled = true;
+        // respect_user_override is OPT-IN (decide-route.js normalizePolicy).
+        public bool AllowUpgrade = true, RespectUserOverride = false, FleetEnabled = true;
     }
     class DrDecision
     {
@@ -5954,7 +5955,9 @@ public static class CfaiEnforcer
         {
             CatalogOverrides = DrList(DrGet(p, "catalog_overrides")),
             AllowUpgrade = !DrIsFalse(DrGet(settings, "allow_upgrade")),
-            RespectUserOverride = !DrIsFalse(DrGet(settings, "respect_user_override")),
+            // Opt-in: only an explicit true (a manual switch no longer stands
+            // routing down unless the admin asked for it).
+            RespectUserOverride = DrIsTrue(DrGet(settings, "respect_user_override")),
             FleetEnabled = !DrIsFalse(DrGet(p, "fleet_enabled")),
         };
         foreach (object r in DrList(DrGet(p, "rules")))
@@ -6367,8 +6370,12 @@ public static class CfaiEnforcer
     // switches upgrades off.
     //
     // Per conversation: the tier we routed to. A user change AWAY from it is a
-    // user override -- routing stands down for that conversation (decideRoute's
-    // respect_user_override) and it is reported once. A conversation is the
+    // user override. It is RECORDED here either way, but routing stands down for
+    // that conversation (and it is reported, once) ONLY when the policy sets
+    // respect_user_override: true -- opt-in since 2026-10-07. By default the
+    // user's pick is simply the new current tier and the next prompt is routed
+    // from it (live: a user who picked 3.1 Pro by hand and then typed "hi" got
+    // no route for the rest of the conversation). A conversation is the
     // (host, navigation generation, window) on the web and the (app, window) on
     // the desktop, which has no conversation id; there it also lapses after
     // MR_OVERRIDE_TTL.
@@ -7355,11 +7362,19 @@ public static class CfaiEnforcer
         AutomationElement el;
         try { el = AutomationElement.FocusedElement; } catch { el = null; }
         if (el == null) return;
+        // The edit sequence BEFORE the text: a key that lands between the two
+        // reads makes this tick's decision stale for the Enter that follows,
+        // never the other way round (RouteEnterPlan then decides at send time).
+        long seqAtRead = Interlocked.Read(ref _mrEditSeq);
         string text = null;
         try { text = ReadText(el); } catch { }
         // An empty composer has nothing to send: drop any note left for a
-        // previous prompt so it cannot ride out on an unrelated Enter.
-        if (string.IsNullOrEmpty(text)) { ClearRouteNote(); return; }
+        // previous prompt so it cannot ride out on an unrelated Enter -- and
+        // any pin, which can only be for a prompt that has already gone out
+        // (never route a submitted prompt). The surface stays eligible, so a
+        // prompt typed and sent inside one poll tick is still decided at Enter.
+        if (string.IsNullOrEmpty(text)) { ClearPendingRoute(); MrTouchEligible(fg); return; }
+        _mrLastReadText = text;
         int[] composerRid = null;
         try { composerRid = el.GetRuntimeId(); } catch { }
         if (composerRid == null) return;
@@ -7384,6 +7399,9 @@ public static class CfaiEnforcer
         string appKey = DesktopAppKey(_app) ?? (_app ?? "");
         string curTier = MrTierOfLabel("desktop_app", appKey, label);
         string provider = MrProviderOf("desktop_app", appKey);
+        // A picker the catalog can read: an Enter here may be held and decided
+        // at send time (RouteEnterPlan / RunHeldEnter).
+        if (curTier != null) MrPublishEligible(false, fg, "", 0, null, appKey);
         var meta = new RouteMeta
         {
             Surface = "desktop_app",
@@ -7402,7 +7420,14 @@ public static class CfaiEnforcer
 
         // Dedup against the poll thread's own ~150ms cadence — nothing about
         // the prompt or the picker changed, so there is nothing new to compute.
+        // NEVER PIN A PROMPT THAT HAS ALREADY GONE OUT. Right after a send the
+        // composer can still READ as the prompt for a moment (the accessibility
+        // tree lags the page); with no key pressed since, that is the submitted
+        // text, not a new prompt.
+        if (MrIsSubmittedText(text, seqAtRead)) { ClearPendingRoute(); return; }
+
         string dedupKey = NormalizeWs(text) + "|" + label;
+        if (dedupKey == _mrLastObservedKey) MrDedupSeq(text, fg, seqAtRead);
         if (dedupKey == _mrLastObservedKey) { MrRefreshPinOnDedup(text, composerRid, el, fg); return; }
         _mrLastObservedKey = dedupKey;
 
@@ -7413,7 +7438,7 @@ public static class CfaiEnforcer
         // already on is noop/already_on_target -- nothing is armed, so Enter
         // passes straight through and the picker is never opened.
         var decision = MrDecideForPin(meta, _app, curTier, complexity, effortFrom, text.Length);
-        if (decision == null) return;
+        if (decision == null) { MrMarkNoRoute(seqAtRead); return; }
 
         lock (_routeLock)
         {
@@ -7426,6 +7451,9 @@ public static class CfaiEnforcer
                 && string.Equals(_pendingRouteToLabel, decision.ToLabel ?? "", StringComparison.Ordinal);
             if (!samePrompt) _pendingRouteId = Guid.NewGuid().ToString("N");
             _pendingRouteArmed = true;
+            // The edit sequence this pin is exact for (RouteEnterPlan).
+            _pendingRouteSeq = seqAtRead;
+            _mrLastDecisionRouted = true;
             _pendingRouteFromTier = curTier;
             _pendingRouteToTier = decision.TargetTier;
             _pendingRouteToLabel = decision.ToLabel ?? "";
@@ -7515,6 +7543,11 @@ public static class CfaiEnforcer
         if (provider.Length == 0) provider = webPicker.Provider ?? "";
         if (!string.Equals(provider, webPicker.Provider, StringComparison.OrdinalIgnoreCase))
         { ClearPendingRoute(); return; }
+        // Every gate above passed and the catalog reads the picker: an Enter
+        // in this composer may be held and decided at send time (RunHeldEnter).
+        // Published BEFORE the text is read, so an empty composer -- the moment
+        // before a fast "hi" + Enter -- is already covered.
+        if (curTier != null) MrPublishEligible(true, fg, webHost, _browserNavGen, webPicker, "");
         var meta = new RouteMeta
         {
             Surface = "browser",
@@ -7537,12 +7570,18 @@ public static class CfaiEnforcer
         // readable by one element.
         AutomationElement el = CachedWebComposer();
         if (el == null) { ClearPendingRoute(); return; }
+        // The edit sequence BEFORE the text (see the desktop arm).
+        long seqAtRead = Interlocked.Read(ref _mrEditSeq);
         string text = null;
         try { text = ReadText(el); } catch { }
+        // Empty: whatever was pinned has been sent or erased -- never route it.
         if (string.IsNullOrEmpty(text)) { ClearPendingRoute(); return; }
+        _mrLastReadText = text;
         int[] composerRid = null;
         try { composerRid = el.GetRuntimeId(); } catch { }
         if (composerRid == null) { ClearPendingRoute(); return; }
+        // Never pin a prompt that has already gone out (the UIA read lags the page).
+        if (MrIsSubmittedText(text, seqAtRead)) { ClearPendingRoute(); return; }
 
         // ── THE RESTORE BUDGET, and it gates ARMING, not restoring ──────────
         //
@@ -7558,13 +7597,13 @@ public static class CfaiEnforcer
         // WEB ONLY. The desktop path has never had a restore step and is not
         // being given one; adding this gate there would change which prompts
         // Claude Desktop routes.
-        if (!WriteFitsBudget(text)) { ClearPendingRoute(); return; }
+        if (!WriteFitsBudget(text)) { ClearPendingRoute(); MrMarkNoRoute(seqAtRead); return; }
 
         // Dedup against the poll thread's own ~150ms cadence. The HOST joins the
         // key: the same text in front of the same label on a different surface
         // is a different decision.
         string dedupKey = NormalizeWs(text) + "|" + label + "|" + (_fgWebHost ?? "");
-        if (dedupKey == _mrLastObservedKey) return;
+        if (dedupKey == _mrLastObservedKey) { MrDedupSeq(text, fg, seqAtRead); return; }
         _mrLastObservedKey = dedupKey;
 
         string complexity = ClassifyComplexity(text);
@@ -7573,7 +7612,7 @@ public static class CfaiEnforcer
         // the pin; noop -- including already-on-target -- arms nothing, so the
         // picker is never opened for it.
         var decision = MrDecideForPin(meta, _app, curTier, complexity, effortFrom, text.Length);
-        if (decision == null) return;
+        if (decision == null) { MrMarkNoRoute(seqAtRead); return; }
 
         lock (_routeLock)
         {
@@ -7581,6 +7620,8 @@ public static class CfaiEnforcer
                 && string.Equals(_pendingRouteToLabel, decision.ToLabel ?? "", StringComparison.Ordinal);
             if (!samePrompt) _pendingRouteId = Guid.NewGuid().ToString("N");
             _pendingRouteArmed = true;
+            _pendingRouteSeq = seqAtRead;
+            _mrLastDecisionRouted = true;
             _pendingRouteFromTier = curTier;
             _pendingRouteToTier = decision.TargetTier;
             _pendingRouteToLabel = decision.ToLabel ?? "";
@@ -7607,7 +7648,7 @@ public static class CfaiEnforcer
 
     static void ClearPendingRoute()
     {
-        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; _pendingRouteMeta = null; _pendingRouteComposerEl = null; }
+        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteCtx = null; _pendingRouteMeta = null; _pendingRouteComposerEl = null; _pendingRouteSeq = -2; }
         ClearRouteNote();
     }
 
@@ -7827,12 +7868,14 @@ public static class CfaiEnforcer
         if (ctx != null)
         {
             RouteCtx c = ctx;
-            body = () => RunWebRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, c);
+            // RunPinnedRoute: the pin is acted on only while the composer still
+            // holds the text it was decided for; otherwise it is decided again.
+            body = () => RunPinnedRoute(true, () => RunWebRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, c), hwnd, originalText);
         }
         else
         {
             AutomationElement ce = composerEl;
-            body = () => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, ce);
+            body = () => RunPinnedRoute(false, () => RunRoute(routeId, fromTier, toTier, toLabel, provider, complexity, originalText, composerRid, hwnd, ce), hwnd, originalText);
         }
         if (!StartRouteThread(run, body))
         {
@@ -7841,6 +7884,501 @@ public static class CfaiEnforcer
             return false;
         }
         return true;
+    }
+
+    // ════ NEVER SEND BEFORE THE DECISION (2026-10-07) ══════════════════════
+    //
+    // Live (agent 35419d9f = 74e47cc, Gemini in Edge, desktop web arm, no
+    // extension): the user's short prompt ("hi" / "hello") on 3.1 Pro, then
+    //   04:47:40.601 prompt (send)         <- the route thread's Emit before its Enter
+    //   04:47:42.127 model_routed applied  <- 1.5s later
+    // and the user saw "a lag for each model routing change". Two defects:
+    //
+    //   1. THE HOOK ONLY KNEW "A PIN EXISTS", NOT "A PIN FOR THIS TEXT". The
+    //      decision is made on the poll thread (~150ms cadence + UIA reads +
+    //      classify). An Enter that beat it -- a fast "hi" + Enter from an
+    //      empty composer -- found no pin and went out UNROUTED; an Enter
+    //      right after an edit found the pin of the PREVIOUS text and routed
+    //      on a stale decision (or failed composer_lost and sent nothing).
+    //   2. THE ROUTE'S REPORT WAITED 1.5s AFTER ITS OWN SEND (RouteAfterEnter
+    //      slept the whole post-send window before its first read), so the
+    //      event, and the release of the Enter key, trailed the send.
+    //
+    // THE RULE NOW. The hook keeps a composer EDIT SEQUENCE (one Interlocked
+    // increment per key that can change the text). The poll thread records the
+    // sequence its decision was made for, read BEFORE the text. At Enter:
+    //   * a pin for exactly this sequence           -> the pinned route (fast path)
+    //   * a no-route decision for exactly this one  -> the Enter passes (fast path)
+    //   * anything else, on a routing-eligible composer -> HOLD: the Enter is
+    //     swallowed and a route run (RunHeldEnter, under the same RouteRun
+    //     watchdog) reads the live composer, classifies and decides THEN, and
+    //     either routes + sends, or sends unrouted -- exactly one send.
+    // The hook itself does no UIA and no classify (LowLevelHooksTimeout): it
+    // reads fields and calls GetForegroundWindow, as before.
+    //
+    // NEVER ROUTE A SUBMITTED PROMPT: every send records the sequence (and,
+    // where known, the text) it carried; the poll thread never pins that text
+    // again until a key is pressed, and an empty composer drops any pin.
+
+    static long _mrEditSeq = 0;                 // hook: keys that can change the composer
+    static long _mrSentSeq = -1;                // _mrEditSeq at the last send
+    static long _mrSentAtMs = 0;
+    static volatile string _mrSentText = null;  // what that send carried, when known (never emitted)
+    static volatile string _mrLastReadText = null;   // the routing arms' last composer read
+    static long _mrDecidedSeq = -2;             // a NO-ROUTE decision is exact for this sequence
+    static long _pendingRouteSeq = -2;          // the armed pin is exact for this sequence (under _routeLock)
+    static bool _mrLastDecisionRouted = false;  // poll thread only
+
+    // Where an Enter may be held: published by the poll thread each tick the
+    // routing arm got as far as a picker the catalog can read. The hook reads
+    // one reference and two fields of it.
+    class MrSurfaceSnap
+    {
+        public bool IsWeb;
+        public IntPtr Hwnd;
+        public string Host = "";
+        public int NavGen;
+        public WebPicker Picker;
+        public string AppKey = "";
+        public long AtMs;
+    }
+    static volatile MrSurfaceSnap _mrEligible = null;
+    // Not refreshed for this long (the poll thread stalled, the surface stopped
+    // qualifying) = not eligible: the Enter takes the old path.
+    const int MR_ELIGIBLE_FRESH_MS = 1000;
+    // The held decision's budget: past it the prompt is sent unrouted rather
+    // than kept waiting (the classifier itself is ~25-40ms).
+    const int MR_HELD_DECIDE_BUDGET_MS = 400;
+    // The held run reads the composer until two reads this far apart agree, so
+    // a fast "hello" + Enter is not decided on a lagging "hell".
+    const int MR_HELD_STABLE_READ_MS = 30;
+    const int MR_HELD_STABLE_READS_MAX = 4;
+    // A send this recent, with the composer still reading its text and no key
+    // pressed since, is the submitted prompt -- never routed again.
+    const int MR_SUBMITTED_WINDOW_MS = 3000;
+
+    const int ENTER_PLAN_PASS = 0, ENTER_PLAN_PIN = 1, ENTER_PLAN_HOLD = 2;
+
+    // Pure. The keyboard hook's routing decision for one Enter.
+    static int RouteEnterPlan(bool injected, bool eligible, bool pinArmed, long pinSeq, long decidedSeq, long curSeq, long sentSeq)
+    {
+        // Not ours to decide (our own / another program's synthetic Enter, a
+        // surface not routing-eligible right now): exactly the old behaviour.
+        if (injected || !eligible) return pinArmed ? ENTER_PLAN_PIN : ENTER_PLAN_PASS;
+        // A pin decided for exactly what is being sent.
+        if (pinArmed && pinSeq == curSeq) return ENTER_PLAN_PIN;
+        // Nothing typed since the last send: whatever the composer shows may be
+        // the prompt that just went out. Never routed; the Enter is the user's.
+        if (curSeq == sentSeq) return ENTER_PLAN_PASS;
+        // Decided NOT to route exactly this text.
+        if (!pinArmed && decidedSeq == curSeq) return ENTER_PLAN_PASS;
+        // No decision for this text yet, or one for a different text: decide now.
+        return ENTER_PLAN_HOLD;
+    }
+
+    // Hook. Can this key change the composer's text? Plain Enter is the send;
+    // a bare modifier or lock key changes nothing. Everything else counts --
+    // a false "may edit" only costs a held Enter, never a wrong route.
+    static bool MrKeyMayEdit(int vk, bool shift)
+    {
+        if (vk == VK_RETURN) return shift;   // Shift+Enter is a newline
+        if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == VK_CAPITAL) return false;
+        if (vk >= 0xA0 && vk <= 0xA5) return false;   // L/R Shift, Ctrl, Alt
+        if (vk == 0x5B || vk == 0x5C) return false;   // L/R Windows key
+        return true;
+    }
+
+    // Hook. One reference read, one compare, one clock read.
+    static bool MrEligibleNow(IntPtr fg)
+    {
+        MrSurfaceSnap s = _mrEligible;
+        return s != null && fg != IntPtr.Zero && s.Hwnd == fg && RouteNowMs() - Interlocked.Read(ref s.AtMs) < MR_ELIGIBLE_FRESH_MS;
+    }
+
+    // Poll thread.
+    static void MrPublishEligible(bool isWeb, IntPtr hwnd, string host, int navGen, WebPicker picker, string appKey)
+    {
+        MrSurfaceSnap cur = _mrEligible;
+        if (cur != null && cur.IsWeb == isWeb && cur.Hwnd == hwnd && cur.NavGen == navGen
+            && string.Equals(cur.Host, host ?? "", StringComparison.Ordinal)
+            && string.Equals(cur.AppKey, appKey ?? "", StringComparison.Ordinal) && cur.Picker == picker)
+        { Interlocked.Exchange(ref cur.AtMs, RouteNowMs()); return; }
+        _mrEligible = new MrSurfaceSnap { IsWeb = isWeb, Hwnd = hwnd, Host = host ?? "", NavGen = navGen, Picker = picker, AppKey = appKey ?? "", AtMs = RouteNowMs() };
+    }
+
+    // Poll thread: the composer is empty -- still the same eligible surface.
+    static void MrTouchEligible(IntPtr hwnd)
+    {
+        MrSurfaceSnap cur = _mrEligible;
+        if (cur != null && cur.Hwnd == hwnd) Interlocked.Exchange(ref cur.AtMs, RouteNowMs());
+    }
+
+    // Poll thread. The submitted prompt, still showing, with no key since?
+    static bool MrIsSubmittedText(string text, long seqAtRead)
+    {
+        string sent = _mrSentText;
+        if (sent == null || seqAtRead != Interlocked.Read(ref _mrSentSeq)) return false;
+        if (RouteNowMs() - Interlocked.Read(ref _mrSentAtMs) > MR_SUBMITTED_WINDOW_MS) return false;
+        return NormalizeWs(text) == NormalizeWs(sent);
+    }
+
+    // Poll thread, on a dedup tick: the text is the one already decided for,
+    // so that decision is exact for this sequence too. A routed decision whose
+    // pin has since gone (consumed, cleared) covers nothing -- the Enter is
+    // then held and decided afresh rather than passed unrouted.
+    static void MrDedupSeq(string text, IntPtr hwnd, long seq)
+    {
+        lock (_routeLock)
+        {
+            if (_pendingRouteArmed && _pendingRouteHwnd == hwnd
+                && string.Equals(_pendingRouteOriginalText, text, StringComparison.Ordinal))
+            { _pendingRouteSeq = seq; return; }
+        }
+        if (!_mrLastDecisionRouted) Interlocked.Exchange(ref _mrDecidedSeq, seq);
+    }
+
+    static void MrMarkNoRoute(long seq)
+    {
+        _mrLastDecisionRouted = false;
+        Interlocked.Exchange(ref _mrDecidedSeq, seq);
+    }
+
+    // Every send we make or see: what went out, so it is never routed again.
+    static void MrNoteSubmitted(string text)
+    {
+        _mrSentText = text;
+        Interlocked.Exchange(ref _mrSentAtMs, RouteNowMs());
+        Interlocked.Exchange(ref _mrSentSeq, Interlocked.Read(ref _mrEditSeq));
+    }
+
+    // Hook, clean-send branch (the user's own Enter went through). The text is
+    // the routing arm's last read (a reference copy -- no UIA here), and the
+    // pin, which was not taken, can only describe this prompt: dropped.
+    static void MrNoteSubmittedFromHook()
+    {
+        MrNoteSubmitted(_mrLastReadText);
+        lock (_routeLock) { _pendingRouteId = ""; _pendingRouteArmed = false; _pendingRouteSeq = -2; }
+    }
+
+    // Hook thread. TRUE when the held run took this Enter (it then owns the
+    // one send), FALSE when it did not (the Enter goes through untouched).
+    static bool StartHeldRoute(IntPtr fg)
+    {
+        if (RouteInProgressLive() || _rewriteInProgress) return true;
+        MrSurfaceSnap snap = _mrEligible;
+        if (snap == null || snap.Hwnd != fg) return false;
+        ClearPendingRoute();
+        _activeRouteHwnd = fg;
+        Interlocked.Exchange(ref _routeStartedMs, RouteNowMs());
+        _routeInProgress = true;
+        _routeAbort = false;
+        _activeRouteMeta = null;
+        var run = new RouteRun
+        {
+            Gen = Interlocked.Increment(ref _routeGenCounter),
+            Hwnd = fg,
+            // A web run carries its page from the start, so the watchdog's
+            // cleanup uses the WEB hands (never a browser's FocusedElement).
+            Ctx = snap.IsWeb ? new RouteCtx { Host = snap.Host, Picker = snap.Picker, EffortFrom = "", LabelBefore = "", NavGen = snap.NavGen } : null,
+            StartedMs = RouteNowMs(),
+        };
+        run.Stage = "held_decide";
+        MrSurfaceSnap s = snap;
+        return StartRouteThread(run, () => RunHeldEnter(s));
+    }
+
+    // Pure. What a held Enter does, from what the route thread read.
+    //   abandon  the window / page / host changed under the Enter: no send,
+    //            the prompt stays (it was never meant for what is in front now)
+    //   release  nothing to decide on (unreadable, empty, extension-owned, or
+    //            the prompt that was just submitted): the user's Enter, put back
+    //   send     decided not to route (or decided too late): sent once, unrouted
+    //   route    decided to route: switch, then send once
+    static string HeldEnterVerdict(string readWhy, string text, string sentText, bool sentRecently, bool routed, long elapsedMs, int budgetMs)
+    {
+        if (readWhy == "focus_changed" || readWhy == "navigated" || readWhy == "host_changed") return "abandon";
+        if (readWhy != null) return "release";
+        string t = NormalizeWs(text);
+        if (t.Length == 0) return "release";
+        if (sentText != null && sentRecently && t == NormalizeWs(sentText)) return "release";
+        if (elapsedMs > budgetMs) return "send";
+        return routed ? "route" : "send";
+    }
+
+    // What the held run read off the page at send time.
+    class MrHeldRead
+    {
+        public string Why;             // null = everything below is valid
+        public AutomationElement Composer;
+        public int[] Rid;
+        public string Text = "";
+        public string Label = "";
+        public string CurTier;
+        public string Provider = "";
+        public RouteMeta Meta;
+        public RouteCtx Ctx;           // web only
+        public string EffortFrom = "";
+        public bool FitsRestore = true;   // web: the restore budget (see UpdateWebModelRouting)
+    }
+
+    // The composer's text, read until two reads agree (the accessibility tree
+    // can trail the last keystroke by a few ms). Route thread only.
+    static string MrStableText(AutomationElement el)
+    {
+        string a = null;
+        try { a = ReadText(el); } catch { return null; }
+        for (int i = 0; i < MR_HELD_STABLE_READS_MAX; i++)
+        {
+            RouteCheckpoint(null);
+            Thread.Sleep(MR_HELD_STABLE_READ_MS);
+            string b = null;
+            try { b = ReadText(el); } catch { return null; }
+            if (NormalizeWs(a) == NormalizeWs(b)) return b;
+            a = b;
+        }
+        return a;
+    }
+
+    // Web: through the one door (CachedWebComposer), never FocusedElement.
+    static MrHeldRead MrHeldReadWeb(MrSurfaceSnap snap)
+    {
+        var r = new MrHeldRead();
+        if (GetForegroundWindow() != snap.Hwnd) { r.Why = "focus_changed"; return r; }
+        if (_browserNavGen != snap.NavGen) { r.Why = "navigated"; return r; }
+        if (!string.Equals(_fgWebHost ?? "", snap.Host ?? "", StringComparison.Ordinal)) { r.Why = "host_changed"; return r; }
+        if (RoutingOwnedByExtension(_app)) { r.Why = "extension_owned"; return r; }
+        AutomationElement el = CachedWebComposer();
+        if (el == null) { r.Why = "composer_not_readable"; return r; }
+        string text = MrStableText(el);
+        if (text == null) { r.Why = "composer_not_readable"; return r; }
+        int[] rid = null;
+        try { rid = el.GetRuntimeId(); } catch { }
+        if (rid == null) { r.Why = "composer_not_readable"; return r; }
+        r.Composer = el; r.Rid = rid; r.Text = text;
+        if (string.IsNullOrEmpty(NormalizeWs(text))) return r;
+        AutomationElement picker = VerifiedWebPicker(snap.Hwnd, snap.Host, snap.Picker);
+        if (picker == null) { r.Why = "picker_not_found"; return r; }
+        string label = null;
+        try { label = picker.Current.Name; } catch { }
+        if (string.IsNullOrEmpty(label)) { r.Why = "picker_unreadable"; return r; }
+        string curTier = MrTierOfLabel("browser", snap.Host, label);
+        if (curTier == null) { int bt = ResolveButtonTier(label, snap.Picker); if (bt > 0) curTier = MrTierName(bt); }
+        string provider = MrProviderOf("browser", snap.Host);
+        if (provider.Length == 0) provider = snap.Picker.Provider ?? "";
+        if (!string.Equals(provider, snap.Picker.Provider, StringComparison.OrdinalIgnoreCase)) { r.Why = "provider_mismatch"; return r; }
+        r.Label = label; r.CurTier = curTier; r.Provider = provider;
+        r.EffortFrom = ModelEffortFromLabel(label, snap.Picker.NamePrefix);
+        r.FitsRestore = WriteFitsBudget(text);
+        r.Meta = new RouteMeta
+        {
+            Surface = "browser",
+            HostOrApp = snap.Host,
+            ChoiceKey = "browser|" + snap.Host + "|" + provider,
+            ConvKey = "browser|" + snap.Host + "|" + snap.NavGen + "|" + snap.Hwnd.ToInt64(),
+        };
+        r.Ctx = new RouteCtx { Host = snap.Host, Picker = snap.Picker, EffortFrom = r.EffortFrom, LabelBefore = label, NavGen = snap.NavGen };
+        return r;
+    }
+
+    // Desktop app (Claude Desktop): the focused composer, as the desktop arm reads it.
+    static MrHeldRead MrHeldReadDesktop(MrSurfaceSnap snap)
+    {
+        var r = new MrHeldRead();
+        if (GetForegroundWindow() != snap.Hwnd) { r.Why = "focus_changed"; return r; }
+        AutomationElement el = null;
+        try { el = AutomationElement.FocusedElement; } catch { }
+        if (el == null || !RouteElementEditable(el)) { r.Why = "composer_not_readable"; return r; }
+        string text = MrStableText(el);
+        if (text == null) { r.Why = "composer_not_readable"; return r; }
+        int[] rid = null;
+        try { rid = el.GetRuntimeId(); } catch { }
+        if (rid == null) { r.Why = "composer_not_readable"; return r; }
+        r.Composer = el; r.Rid = rid; r.Text = text;
+        if (string.IsNullOrEmpty(NormalizeWs(text))) return r;
+        AutomationElement picker = GetCachedModelPicker(snap.Hwnd);
+        if (picker == null) { r.Why = "picker_not_found"; return r; }
+        string label = null;
+        try { label = picker.Current.Name; } catch { }
+        if (string.IsNullOrEmpty(label)) { r.Why = "picker_unreadable"; return r; }
+        r.Label = label;
+        r.CurTier = MrTierOfLabel("desktop_app", snap.AppKey, label);
+        r.Provider = MrProviderOf("desktop_app", snap.AppKey);
+        r.EffortFrom = ModelEffortFromLabel(label, MODEL_PICKER_NAME_PREFIX_DEFAULT);
+        r.Meta = new RouteMeta
+        {
+            Surface = "desktop_app",
+            HostOrApp = snap.AppKey,
+            ChoiceKey = "desktop_app|" + snap.AppKey + "|" + r.Provider,
+            ConvKey = "desktop_app|" + snap.AppKey + "|" + snap.Hwnd.ToInt64(),
+        };
+        return r;
+    }
+
+    // The held run: read, decide, then exactly one of abandon / release / send
+    // / route. Runs on a route thread under the RouteRun watchdog.
+    static void RunHeldEnter(MrSurfaceSnap snap)
+    {
+        RouteRun run = _tsRun;
+        long t0 = RouteNowMs();
+        try
+        {
+            RouteCheckpoint("held_decide");
+            MrHeldRead rd = snap.IsWeb ? MrHeldReadWeb(snap) : MrHeldReadDesktop(snap);
+            DrDecision d = null;
+            string complexity = "";
+            if (rd.Why == null && NormalizeWs(rd.Text).Length > 0)
+            {
+                complexity = ClassifyComplexity(rd.Text);
+                RouteCheckpoint("held_decide");
+                d = MrDecideForPin(rd.Meta, _app, rd.CurTier, complexity, rd.EffortFrom, rd.Text.Length);
+                // The web restore budget gates ROUTING exactly as it gates arming.
+                if (d != null && snap.IsWeb && !rd.FitsRestore) { ClearPendingRoute(); d = null; }
+            }
+            bool sentRecently = RouteNowMs() - Interlocked.Read(ref _mrSentAtMs) <= MR_SUBMITTED_WINDOW_MS;
+            string verdict = HeldEnterVerdict(rd.Why, rd.Text, _mrSentText, sentRecently, d != null, RouteNowMs() - t0, MR_HELD_DECIDE_BUDGET_MS);
+            if (run != null)
+            {
+                run.Meta = rd.Meta; run.Ctx = rd.Ctx ?? run.Ctx; run.Composer = rd.Composer; run.ComposerRid = rd.Rid;
+                run.OriginalText = rd.Text ?? ""; run.Complexity = complexity; run.Provider = rd.Provider ?? "";
+                run.FromTier = rd.CurTier ?? ""; run.EffortFrom = rd.EffortFrom ?? "";
+                if (d != null) { run.ToTier = d.TargetTier ?? ""; run.ToLabel = d.ToLabel ?? ""; }
+            }
+            _activeRouteMeta = rd.Meta;
+
+            if (verdict == "abandon")
+            {
+                ClearRouteNote();
+                EmitRoute(_app, rd.Provider, rd.CurTier, "", "", complexity, "failed", -1, "held_" + rd.Why);
+                return;
+            }
+            if (verdict == "release") { ClearRouteNote(); HeldReleaseEnter(snap); return; }
+            if (verdict == "send")
+            {
+                // Decided too late: the route is not acted on, and a note made
+                // for it is not sent either.
+                if (d != null) ClearRouteNote();
+                HeldSendUnrouted(snap, rd);
+                return;
+            }
+
+            // ROUTE. The same route a pin would have run, with what was decided
+            // now, on this thread (already under the watchdog).
+            string routeId = Guid.NewGuid().ToString("N");
+            if (run != null) run.Stage = "preflight";
+            if (snap.IsWeb)
+                RunWebRoute(routeId, rd.CurTier, d.TargetTier, d.ToLabel ?? "", rd.Provider, complexity, rd.Text, rd.Rid, snap.Hwnd, rd.Ctx);
+            else
+                RunRoute(routeId, rd.CurTier, d.TargetTier, d.ToLabel ?? "", rd.Provider, complexity, rd.Text, rd.Rid, snap.Hwnd, rd.Composer);
+        }
+        catch (RouteAbandonedException)
+        {
+            // The watchdog owns this run (it reported and released the Enter).
+        }
+        catch (Exception)
+        {
+            // Unknown state: no send, the prompt stays where it is.
+            ClearPendingRoute();
+            EmitRoute(_app, run != null ? run.Provider : "", run != null ? run.FromTier : "", "", "", run != null ? run.Complexity : "", "failed", -1, "held_exception");
+        }
+        finally
+        {
+            RouteRelease(_tsRun);
+        }
+    }
+
+    // The user's own Enter, put back: nothing was decided, so nothing is
+    // reported and nothing about the page was touched -- this is exactly the
+    // keypress the hook held, tens of ms later, into the same window.
+    static void HeldReleaseEnter(MrSurfaceSnap snap)
+    {
+        if (GetForegroundWindow() != snap.Hwnd) { EmitRoute(_app, "", "", "", "", "", "failed", -1, "held_release_focus_changed"); return; }
+        if (snap.IsWeb && _browserNavGen != snap.NavGen) { EmitRoute(_app, "", "", "", "", "", "failed", -1, "held_release_navigated"); return; }
+        // Exactly one send: lost only to the watchdog, which then owns the report.
+        if (!RouteClaimSend()) return;
+        int len = TypedLength();
+        if (len >= 1) Emit("prompt", _app, "", "send", len);
+        TypedClear(); _blockTyped = false; _typedPatterns = "";
+        MrNoteSubmitted(_mrLastReadText);
+        SendKeyPress(VK_RETURN);
+    }
+
+    // Decided NOT to route: the prompt goes out once, unrouted, through the
+    // same pre-Enter gate and after-Enter check every route send uses, and the
+    // decision's note (noop / suggested / observed) rides with it, as on the
+    // clean-send path. A route event only when it could not be sent.
+    static void HeldSendUnrouted(MrSurfaceSnap snap, MrHeldRead rd)
+    {
+        RouteCheckpoint("held_gate");
+        RouteGateOutcome gate = HeldGateUia(snap, rd);
+        if (!gate.Ok)
+        {
+            // The text moved on since the read (the page caught up with the
+            // last keystroke): the user's Enter, as it was, is still right.
+            if (gate.Reason == "text_changed") { ClearRouteNote(); HeldReleaseEnter(snap); return; }
+            ClearRouteNote();
+            EmitRoute(_app, rd.Provider, rd.CurTier, "", "", "", "failed", -1, "held_not_sent_" + gate.Reason);
+            return;
+        }
+        if (GetForegroundWindow() != snap.Hwnd) { ClearRouteNote(); EmitRoute(_app, rd.Provider, rd.CurTier, "", "", "", "failed", -1, "held_not_sent_focus_changed"); return; }
+        // Exactly one send: lost only to the watchdog, which then owns the report.
+        if (!RouteClaimSend()) return;
+
+        Emit("prompt", _app, "", "send", rd.Text.Length);
+        TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
+        _blockUia = false; _uiaPatterns = "";
+        _blockPaste = false; _lastPasteTicks = 0;
+        _mrLastObservedKey = "";
+        MrNoteSubmitted(rd.Text);
+
+        SendKeyPress(VK_RETURN);
+        RouteAfterEnterOutcome after = HeldAfterEnterUia(snap, rd);
+        if (!after.Submitted)
+        {
+            ClearRouteNote();
+            EmitRoute(_app, rd.Provider, rd.CurTier, "", "", "", "failed", rd.Text.Length, "held_not_submitted_" + after.Verdict);
+            return;
+        }
+        EmitRouteNote();
+    }
+
+    static RouteGateOutcome HeldGateUia(MrSurfaceSnap snap, MrHeldRead rd)
+    {
+        if (snap.IsWeb) return WebGateUia(rd.Ctx ?? new RouteCtx { Host = snap.Host, Picker = snap.Picker, NavGen = snap.NavGen }, snap.Hwnd, rd.Rid, rd.Composer, rd.Text);
+        return DesktopGateUia(snap.Hwnd, rd.Rid, rd.Composer, rd.Text, rd.Meta);
+    }
+
+    static RouteAfterEnterOutcome HeldAfterEnterUia(MrSurfaceSnap snap, MrHeldRead rd)
+    {
+        if (snap.IsWeb) return WebAfterEnterUia(rd.Ctx ?? new RouteCtx { Host = snap.Host, Picker = snap.Picker, NavGen = snap.NavGen }, snap.Hwnd, rd.Rid, rd.Composer, rd.Text);
+        return DesktopAfterEnterUia(snap.Hwnd, rd.Rid, rd.Composer, rd.Text, rd.Meta);
+    }
+
+    // A pin's route, but only for the text actually being sent: a composer that
+    // now holds something else (an edit no key reported -- a mouse paste, a
+    // dictation -- or a pin read off a lagging accessibility tree) is decided
+    // again, now, instead of failing composer_lost with nothing sent.
+    static bool MrPinTextIsLive(bool web, string originalText)
+    {
+        try
+        {
+            AutomationElement el = web ? CachedWebComposer() : AutomationElement.FocusedElement;
+            if (el == null || (!web && !RouteElementEditable(el))) return true;   // unreadable: the route's own preflight decides
+            string t = ReadText(el);
+            return NormalizeWs(t) == NormalizeWs(originalText);
+        }
+        catch { return true; }
+    }
+
+    static void RunPinnedRoute(bool web, Action pinned, IntPtr hwnd, string originalText)
+    {
+        MrSurfaceSnap snap = _mrEligible;
+        if (snap != null && snap.Hwnd == hwnd && snap.IsWeb == web && !MrPinTextIsLive(web, originalText))
+        {
+            ClearPendingRoute();
+            RunHeldEnter(snap);
+            return;
+        }
+        pinned();
     }
 
     // ── Desktop route recovery: the PURE verdicts ────────────────────────────
@@ -7940,6 +8478,10 @@ public static class CfaiEnforcer
     }
 
     const int ROUTE_VERIFY_MS = 2500;            // the poll, as before
+    // The label is re-read this often (was 60ms). A Name read is one cheap UIA
+    // call; the throttled parts (the dialog probe, the picker re-find) keep
+    // their own clocks, so a faster poll only notices a landed switch sooner.
+    const int ROUTE_SWITCH_POLL_MS = 30;
     const int ROUTE_RETRY_INVOKE_MS = 500;       // Select() -> Invoke() retry, as before
     const int ROUTE_CONFIRM_APPEAR_MS = 1500;    // how long a dialog is looked for at all
     const int ROUTE_CONFIRM_SETTLE_MS = 1500;    // after confirming: time for the switch to land
@@ -8104,7 +8646,7 @@ public static class CfaiEnforcer
                 o.Retries++;
                 try { io.RetryActivate(); } catch { }
             }
-            io.Sleep(60);
+            io.Sleep(ROUTE_SWITCH_POLL_MS);
         } while (io.NowMs() < deadline);
 
         if (o.Switched) return o;
@@ -8934,13 +9476,36 @@ public static class CfaiEnforcer
         public bool MenuLeftOpen;
     }
 
+    // How often the post-send window reads the composer. The window itself
+    // (VerifyMs: 1500ms on a web surface, 200ms on the desktop) is the CEILING
+    // for "still there", no longer a fixed wait: live 2026-10-07 the route's
+    // report -- and the release of the swallowed Enter -- trailed its own send
+    // by the full 1.5s, which read as "it changed after the prompt was sent".
+    // An empty composer read at any poll is a send, exactly as it was at the
+    // end of the window; only "still there" needs the whole window, because a
+    // browser composer's "I am empty" crosses an accessibility hop first.
+    const int ROUTE_POST_SEND_POLL_MS = 50;
+
+    // Waits up to maxMs for the composer to let go of the prompt. True = it did.
+    static bool RouteAwaitComposerCleared(RouteAfterEnterIo io, int maxMs)
+    {
+        int waited = 0;
+        do
+        {
+            int step = Math.Min(ROUTE_POST_SEND_POLL_MS, Math.Max(0, maxMs - waited));
+            if (step > 0) io.Sleep(step);
+            waited += step;
+            if (!RouteSafeBool(io.StillThere)) return true;
+        } while (waited < maxMs);
+        return false;
+    }
+
     static RouteAfterEnterOutcome RouteAfterEnter(RouteAfterEnterIo io)
     {
         var o = new RouteAfterEnterOutcome();
         for (int pass = 0; pass < 2; pass++)
         {
-            io.Sleep(io.VerifyMs);
-            if (!RouteSafeBool(io.StillThere)) { o.Submitted = true; return o; }
+            if (RouteAwaitComposerCleared(io, io.VerifyMs)) { o.Submitted = true; return o; }
             bool menu = RouteSafeBool(io.MenuOpen);
             bool inComposer = !menu && RouteSafeBool(io.FocusInComposer);
             string v = RoutePostSendVerdict(true, menu, inComposer);
@@ -9269,7 +9834,7 @@ public static class CfaiEnforcer
         // Exactly one send per route: lost only to the watchdog, which then owns the report.
         if (!RouteClaimSend()) return;
 
-        Emit("prompt", _app, "", "send", originalText.Length);
+        Emit("prompt", _app, "", "send", originalText.Length); MrNoteSubmitted(originalText);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
         _blockUia = false; _uiaPatterns = "";
         _blockPaste = false; _lastPasteTicks = 0;
@@ -9351,11 +9916,12 @@ public static class CfaiEnforcer
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd)
             { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "interrupted_after_expand"); return; }
 
-            Thread.Sleep(150);   // let the popover render its items
-            RouteCheckpoint("find_item");
-
             AutomationElement win = null;
             try { win = AutomationElement.FromHandle(pinnedHwnd); } catch { }
+            // Let the popover render its items -- polled, not a fixed sleep.
+            if (win != null) RouteAwaitMenuItems(delegate { return DesktopMenuLooksOpen(win, meta); }, delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); }, ROUTE_MENU_RENDER_MAX_MS);
+            RouteCheckpoint("find_item");
+
             AutomationElement targetItem = win != null ? FindMenuItemByLabels(win, labels) : null;
             if (targetItem == null && win != null)
             {
@@ -9394,8 +9960,13 @@ public static class CfaiEnforcer
                     {
                         try { ((ExpandCollapsePattern)mmExpandObj).Expand(); } catch { }
                     }
-                    Thread.Sleep(200);
-                    targetItem = FindMenuItemByLabels(win, labels);
+                    // The flyout's items, polled (was a fixed 200ms).
+                    for (int subWaited = 0; targetItem == null && subWaited < ROUTE_SUBMENU_MAX_MS; subWaited += ROUTE_SUBMENU_POLL_MS)
+                    {
+                        // No RouteCheckpoint here: the cursor must be put back below.
+                        Thread.Sleep(ROUTE_SUBMENU_POLL_MS);
+                        targetItem = FindMenuItemByLabels(win, labels);
+                    }
                     if (hadPos) { try { SetCursorPos(savedPos.X, savedPos.Y); } catch { } }
                 }
             }
@@ -9427,11 +9998,12 @@ public static class CfaiEnforcer
             if (!usedSelect && !usedInvoke)
             { TryCollapsePicker(picker); FallbackSendOrReport(routeId, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, knownComposer, originalText, "select_failed"); return; }
 
-            // A settle delay before even starting to poll: a NESTED selection
-            // (behind "More models") re-renders more of the surrounding menu
-            // chrome than a top-level one, and needs more than the roughly
-            // 40-80ms a top-level switch settles in.
-            Thread.Sleep(300);
+            // NO fixed settle delay before the poll any more (was 300ms on every
+            // route). RouteAwaitSwitch only ever accepts POSITIVE evidence -- the
+            // picker reading the target tier -- so polling a nested selection
+            // early just reads the old label until the re-render lands; the
+            // Select() -> Invoke() retry still fires ROUTE_RETRY_INVOKE_MS after
+            // the select.
 
             // VERIFY against a FRESH picker button, re-found DURING the poll and
             // not just once: Claude Desktop re-renders the button when the model
@@ -9567,7 +10139,7 @@ public static class CfaiEnforcer
             // back through this same keyboard hook. See RunRewrite's
             // identical comment for the full reasoning, including why
             // _blockUia/_blockPaste specifically must also be cleared here.
-            Emit("prompt", _app, "", "send", originalText.Length);
+            Emit("prompt", _app, "", "send", originalText.Length); MrNoteSubmitted(originalText);
             TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
             _blockUia = false; _uiaPatterns = "";
             _blockPaste = false; _lastPasteTicks = 0;
@@ -9654,6 +10226,55 @@ public static class CfaiEnforcer
     }
 
     const int ROUTE_COLLAPSE_MAX_ESCAPES = 3;
+    // After Collapse() / an Escape the menu is POLLED closed (every
+    // ROUTE_COLLAPSE_POLL_MS) for at most the old fixed waits (80 / 120ms),
+    // instead of always sleeping them out: a menu that closes in a frame no
+    // longer costs the whole wait. Escape is still pressed only after the full
+    // wait has seen the menu open, so no Escape ever lands in a closed menu.
+    const int ROUTE_COLLAPSE_POLL_MS = 20;
+    const int ROUTE_COLLAPSE_PATTERN_WAIT_MS = 80;
+    const int ROUTE_COLLAPSE_ESCAPE_WAIT_MS = 120;
+
+    // After Expand(): POLL for the menu's items instead of a fixed 150ms
+    // sleep. Checked once immediately (Expand is synchronous on most pickers),
+    // then every ROUTE_MENU_POLL_MS for at most ROUTE_MENU_RENDER_MAX_MS; the
+    // item search that follows decides as before whether it found anything.
+    // Returns the time spent waiting.
+    const int ROUTE_MENU_POLL_MS = 30;
+    const int ROUTE_MENU_RENDER_MAX_MS = 600;
+    // A "More models" hover flyout: polled for the target the same way, instead
+    // of a fixed 200ms.
+    const int ROUTE_SUBMENU_POLL_MS = 40;
+    const int ROUTE_SUBMENU_MAX_MS = 600;
+
+    static int RouteAwaitMenuItems(Func<bool> showing, Action<int> sleep, int maxMs)
+    {
+        if (RouteSafeBool(showing)) return 0;
+        int waited = 0;
+        while (waited < maxMs)
+        {
+            int step = Math.Min(ROUTE_MENU_POLL_MS, maxMs - waited);
+            sleep(step);
+            waited += step;
+            if (RouteSafeBool(showing)) break;
+        }
+        return waited;
+    }
+
+    static bool RouteCollapseWaitClosed(RouteCollapseIo io, int maxMs)
+    {
+        int waited = 0;
+        while (waited < maxMs)
+        {
+            int step = Math.Min(ROUTE_COLLAPSE_POLL_MS, maxMs - waited);
+            io.Sleep(step);
+            waited += step;
+            bool open;
+            try { open = io.MenuOpen(); } catch { open = false; }
+            if (!open) return true;
+        }
+        return false;
+    }
 
     static RouteCollapseOutcome RouteCollapseMenu(RouteCollapseIo io)
     {
@@ -9662,18 +10283,16 @@ public static class CfaiEnforcer
         try { open = io.MenuOpen(); } catch { open = false; }
         if (!open) { o.Closed = true; return o; }
         try { io.CollapsePattern(); } catch { }
-        io.Sleep(80);
+        if (RouteCollapseWaitClosed(io, ROUTE_COLLAPSE_PATTERN_WAIT_MS)) { o.Closed = true; return o; }
         for (;;)
         {
-            try { open = io.MenuOpen(); } catch { open = false; }
-            if (!open) { o.Closed = true; return o; }
             if (o.Escapes >= ROUTE_COLLAPSE_MAX_ESCAPES) { o.Reason = "menu_still_open"; return o; }
             bool winOk = false;
             try { winOk = io.WindowOk(); } catch { }
             if (!winOk) { o.Reason = "focus_changed"; return o; }
             o.Escapes++;
             try { io.SendEscape(); } catch { }
-            io.Sleep(120);
+            if (RouteCollapseWaitClosed(io, ROUTE_COLLAPSE_ESCAPE_WAIT_MS)) { o.Closed = true; return o; }
         }
     }
 
@@ -9767,8 +10386,14 @@ public static class CfaiEnforcer
             { try { ((ExpandCollapsePattern)mmExpandObj).Expand(); } catch { } }
         }
         catch { }
-        Thread.Sleep(200);
-        AutomationElement hit = WebFindTargetItem(win, wp, labels, ref anyAmbiguous);
+        // The flyout's items, polled (was a fixed 200ms).
+        AutomationElement hit = null;
+        for (int subWaited = 0; hit == null && subWaited < ROUTE_SUBMENU_MAX_MS; subWaited += ROUTE_SUBMENU_POLL_MS)
+        {
+            // No RouteCheckpoint here: the cursor must be put back below.
+            Thread.Sleep(ROUTE_SUBMENU_POLL_MS);
+            hit = WebFindTargetItem(win, wp, labels, ref anyAmbiguous);
+        }
         if (hadPos) { try { SetCursorPos(savedPos.X, savedPos.Y); } catch { } }
         return hit;
     }
@@ -10000,7 +10625,9 @@ public static class CfaiEnforcer
             if (_routeAbort || GetForegroundWindow() != pinnedHwnd || _browserNavGen != ctx.NavGen)
             { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "interrupted_after_expand", composerEl); return; }
 
-            Thread.Sleep(150);   // let the popover render its items
+            // Let the popover render its items -- polled, not a fixed sleep.
+            List<string> menuLabels = MrAllClickLabels("browser", surfaceHost);
+            RouteAwaitMenuItems(delegate { return WebMenuLooksOpen(win, ctx.Picker, menuLabels); }, delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); }, ROUTE_MENU_RENDER_MAX_MS);
             RouteCheckpoint("find_item");
 
             // ── PRE-SWITCH CONFIRMATION of the pinned from_tier ─────────────
@@ -10071,7 +10698,7 @@ public static class CfaiEnforcer
             if (!usedSelect && !usedInvoke)
             { TryCollapsePicker(picker); WebFallbackSendOrReport(ctx, provider, fromTier, toTier, toLabel, complexity, pinnedHwnd, pinnedComposerRid, originalText, effortFrom, "select_failed", composerEl); return; }
 
-            Thread.Sleep(300);
+            // No fixed settle before the switch wait (was 300ms): see RunRoute.
 
             // Re-find the button FRESH rather than trusting the cached
             // reference, and keep re-finding DURING the wait: a stale reference
@@ -10380,7 +11007,7 @@ public static class CfaiEnforcer
         // Exactly one send per route: lost only to the watchdog, which then owns the report.
         if (!RouteClaimSend()) return;
 
-        Emit("prompt", _app, "", "send", originalText.Length);
+        Emit("prompt", _app, "", "send", originalText.Length); MrNoteSubmitted(originalText);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
         _blockUia = false; _uiaPatterns = "";
         _blockPaste = false; _lastPasteTicks = 0;
@@ -10432,7 +11059,7 @@ public static class CfaiEnforcer
         // Release state before Enter -- our own synthetic Enter passes back
         // through this same keyboard hook. Same clearing RunRewrite and RunRoute
         // do, and for the same reasons.
-        Emit("prompt", _app, "", "send", originalText.Length);
+        Emit("prompt", _app, "", "send", originalText.Length); MrNoteSubmitted(originalText);
         TypedClear(); _blockTyped = false; _typedPatterns = ""; _lastBlockFiredTicks = 0;
         _blockUia = false; _uiaPatterns = "";
         _blockPaste = false; _lastPasteTicks = 0;
@@ -14434,6 +15061,7 @@ public static class CfaiEnforcer
                             {
                                 Emit("prompt", _app, "", "click", len);
                                 TypedClear(); _blockTyped = false; _typedPatterns = "";
+                                MrNoteSubmittedFromHook();   // this prompt is gone: no pin for it may fire later
                             }
                         }
                     }
@@ -14459,6 +15087,13 @@ public static class CfaiEnforcer
                     bool ctrl = Down(VK_CONTROL);
                     bool alt = Down(VK_MENU);
                     bool caps = (GetKeyState(VK_CAPITAL) & 1) != 0;
+
+                    // The composer EDIT SEQUENCE (model routing, RouteEnterPlan):
+                    // one Interlocked increment for any key that can change
+                    // the text -- never the key itself. Ours included (a
+                    // rewrite or a restore retype does change the text); only
+                    // a plain Enter (the send) and bare modifiers do not count.
+                    if (MrKeyMayEdit(vk, shift)) Interlocked.Increment(ref _mrEditSeq);
 
                     if (_rewriteInProgress || _routeInProgress)
                     {
@@ -14782,14 +15417,31 @@ public static class CfaiEnforcer
                                 // the prompt-sent telemetry itself once it
                                 // actually sends, same as the clean-send path
                                 // below would have.
-                                string routeId; bool routeArmed;
-                                lock (_routeLock) { routeId = _pendingRouteId; routeArmed = _pendingRouteArmed; }
-                                if (routeArmed && !string.IsNullOrEmpty(routeId) && !_rewriteInProgress)
+                                string routeId; bool routeArmed; long pinSeq;
+                                lock (_routeLock) { routeId = _pendingRouteId; routeArmed = _pendingRouteArmed; pinSeq = _pendingRouteSeq; }
+                                // NEVER SEND BEFORE THE DECISION (2026-10-07). A pin
+                                // counts only when it was decided for EXACTLY the
+                                // text being sent (same edit sequence); an Enter
+                                // that beat the poll thread is HELD and decided on
+                                // the route thread (RunHeldEnter). Field reads and
+                                // one Win32 call -- no UIA, no classify, here.
+                                bool enterInjected = (((uint)Marshal.ReadInt32(lParam, 8)) & LLKHF_INJECTED) != 0;
+                                IntPtr enterFg = GetForegroundWindow();
+                                int enterPlan = _rewriteInProgress ? ENTER_PLAN_PASS
+                                    : RouteEnterPlan(enterInjected, MrEligibleNow(enterFg), routeArmed && !string.IsNullOrEmpty(routeId),
+                                        pinSeq, Interlocked.Read(ref _mrDecidedSeq), Interlocked.Read(ref _mrEditSeq), Interlocked.Read(ref _mrSentSeq));
+                                if (enterPlan == ENTER_PLAN_PIN)
                                 {
                                     // Swallowed ONLY when a route took it (and so
                                     // owns re-sending it); an expired or stale pin
                                     // falls through to the ordinary send below.
                                     if (StartRoute(routeId)) return (IntPtr)1;
+                                }
+                                else if (enterPlan == ENTER_PLAN_HOLD)
+                                {
+                                    // Swallowed ONLY when the held run took it; it
+                                    // then sends exactly once, routed or not.
+                                    if (StartHeldRoute(enterFg)) return (IntPtr)1;
                                 }
 
                                 // Clean send — capture the prompt (LENGTH ONLY, no
@@ -14801,6 +15453,8 @@ public static class CfaiEnforcer
                                 if (len >= 1) { Emit("prompt", _app, "", "send", len); }
                                 EmitRouteNote();   // a pre-built noop/suggested/observed line, if any
                                 TypedClear(); _blockTyped = false; _typedPatterns = "";
+                                // This prompt is gone: no pin for it may fire later.
+                                if (!enterInjected) MrNoteSubmittedFromHook();
                             }
                         }
                         else if (vk == VK_ESCAPE)
@@ -20335,7 +20989,7 @@ public static class CfaiEnforcer
 
         // Only now is a send actually about to happen, so only now is it
         // counted (length only, the masked text's).
-        Emit("prompt", _app, "", "send", masked.Length);
+        Emit("prompt", _app, "", "send", masked.Length); MrNoteSubmitted(masked);
         io.KeyPress(VK_RETURN);
 
         // Verify the send actually landed, not just that we pressed the

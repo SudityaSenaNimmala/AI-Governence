@@ -66,7 +66,9 @@ test('policy returns the documented shape', async () => {
     assert.match(body.version, /^[0-9a-f]{16}$/);
     assert.equal(body.schema_version, 2);
     assert.equal(body.rules.length, 15);
-    assert.deepEqual(body.settings, { allow_upgrade: true, respect_user_override: true });
+    // respect_user_override is opt-in since 2026-10-07: a manual model switch
+    // no longer stops routing for the conversation unless an admin turns it on.
+    assert.deepEqual(body.settings, { allow_upgrade: true, respect_user_override: false });
     assert.deepEqual(body.catalog_overrides, []);
     assert.equal(body.fleet_enabled, true);
     assert.ok(body.generated_at);
@@ -109,6 +111,7 @@ test('If-None-Match on the current version answers 304; any change moves it', as
     const last = await (await call('GET', '/api/v1/routing/policy', undefined, MACHINE)).json();
     assert.equal(last.fleet_enabled, false);
     assert.equal(last.settings.allow_upgrade, false);
+    assert.equal(last.settings.respect_user_override, false, 'a PUT of another key must not persist the old default');
     assert.deepEqual(last.catalog_overrides, [{ provider: 'anthropic', host_or_app: '*', tier: 'economy', label: 'Haiku 5' }]);
   });
 });

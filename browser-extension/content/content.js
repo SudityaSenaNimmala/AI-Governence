@@ -1205,7 +1205,13 @@
   let _routingUserChoice = {};
   let _routingLastRoute = {};
   let _weAreRouting = false;      // true while OUR code is driving the picker
-  let _routeCancelGen = 0;        // bumped when a route's watchdog fires (see applyRouteDecision)
+  // True from the moment a route PAUSES a send until its one re-send is done.
+  // Any other send event in that window (the click that follows the
+  // pointerdown we paused, a second Enter) is swallowed: the route in flight
+  // owns the prompt, and a second decision made while the picker is mid-switch
+  // would route -- or send -- after the first.
+  let _routeInFlight = false;
+  let _routeCancelGen = 0;       // bumped when a route's watchdog fires (see applyRouteDecision)
   /** A cancellation check for the picker-driving code (changeModelInUI): true
    *  once the route that started it was abandoned by its watchdog, so a switch
    *  that wakes up late stops at its next step instead of clicking on. */
@@ -1315,9 +1321,12 @@
    *   a change while _weAreRouting — ours; ignored.
    *   a change that lands on the tier we just routed to — our switch settling
    *     late in the UI; ignored.
-   *   anything else — the USER picked a model. It becomes their choice, and if
-   *     we had routed this provider in this tab, the user has taken the
-   *     conversation back: routing is suppressed for it (respect_user_override).
+   *   anything else — the USER picked a model. It becomes their choice (and the
+   *     picker's current tier, which the next prompt is routed FROM). If we had
+   *     routed this provider in this tab it is also recorded as an override, but
+   *     routing stands down for the conversation ONLY when the policy sets
+   *     respect_user_override: true -- opt-in since 2026-10-07. Live: after a
+   *     manual switch to a bigger model, "hi" was never routed down again.
    */
   function observePicker() {
     if (!ROUTING || _weAreRouting) return;
@@ -1515,6 +1524,15 @@
     const d = r.decision;
     const len = text.length;
 
+    // A route is already in flight for the prompt on screen: it pauses,
+    // switches and re-sends exactly once. This event (the click after the
+    // pointerdown we paused, an impatient second Enter) must neither start a
+    // second route nor let the prompt out ahead of the switch.
+    if (_routeInFlight) {
+      if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
+      return true;
+    }
+
     if (d.result === 'user_override') {
       const conv = routingConvKey();
       if (!_overrideReported.has(conv)) {
@@ -1543,8 +1561,23 @@
     }
     if (d.result !== 'routed') return false;   // noop / disabled — nothing to do, nothing to report
 
+    // NEVER ROUTE AFTER THE SEND. The decision above was made synchronously,
+    // now, from the live composer text -- but a route is only safe if this
+    // send can actually be HELD. An event the page cannot cancel (or no event
+    // at all) means the prompt is already on its way: switching now would
+    // change the model after the prompt went out, and re-sending would send it
+    // twice. Reported once per page load; the prompt goes out as it was.
+    if (!e || e.cancelable === false) {
+      if (!_unsupportedReported.has('send_not_pausable')) {
+        _unsupportedReported.add('send_not_pausable');
+        emitModelRouted(r, { result: 'unsupported', reason: 'send_not_pausable', len });
+      }
+      return false;
+    }
+
     // PAUSE the send
-    if (e) { e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
+    e.preventDefault(); e.stopImmediatePropagation(); if (typeof e.stopPropagation === 'function') e.stopPropagation();
+    _routeInFlight = true;
     clog('[cfai] ROUTE:', d.from_tier, '→', d.target_tier, d.effort ? '(effort ' + d.effort + ')' : '', d.reason);
 
     // ── STUCK IS IMPOSSIBLE ─────────────────────────────────────────────────
@@ -1608,6 +1641,7 @@
       // (b) The ONE send.
       let send = 'unsafe_exception';
       try { send = await finishRoutedSend(el, text, run); } catch {}
+      _routeInFlight = false;
       // (c) The ONE event. A route whose prompt did NOT go out is a failed
       // route whatever the picker did -- the stuck case must be visible in the
       // data (the server's allowlist keeps result/reason; `send` is extra).
@@ -1624,7 +1658,7 @@
           send,
         },
       );
-    });
+    }).catch(() => {}).finally(() => { _routeInFlight = false; });   // never left set by a throw
     return true;
   }
 

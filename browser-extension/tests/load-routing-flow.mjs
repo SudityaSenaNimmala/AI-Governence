@@ -188,10 +188,13 @@ export function loadRoutingFlow(o) {
   // eslint-disable-next-line no-new-func
   const api = new Function(body)(deps);
 
-  /** One send: decide + act, exactly as tryBlock's routing block does. */
-  api.send = (text) => {
+  /** One send: decide + act, exactly as tryBlock's routing block does.
+   *  opts.cancelable === false -> an event the page cannot cancel;
+   *  opts.noEvent -> no event at all. */
+  api.send = (text, opts = {}) => {
     const r = api.routeDecisionFor(text);
-    const e = {
+    const e = opts.noEvent ? null : {
+      cancelable: opts.cancelable,
       preventDefault() { env.paused++; },
       stopImmediatePropagation() {},
       stopPropagation() {},
