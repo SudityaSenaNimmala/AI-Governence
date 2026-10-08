@@ -14,10 +14,11 @@
 //   Select -> wait      300 ms fixed sleep         0 ms
 //   switch wait         120 ms poll              120 ms poll (30ms cadence)
 //   collapse             80 ms fixed             40 ms polled
-//   pre-Enter gate      150 ms (one settle)      150 ms (unchanged: invariant)
-//   = Enter -> send     800 ms of waiting        340 ms
+//   pre-Enter gate      150 ms (one settle)       50 ms (re-check anchored on the
+//                                                        menu's quiet time, 6323ae9+1)
+//   = Enter -> send     800 ms of waiting        240 ms (340 at 6323ae9)
 //   after the Enter    1500 ms web / 200 desk    150 ms (polled, early exit)
-//   = Enter -> report  2300 ms web               490 ms
+//   = Enter -> report  2300 ms web               390 ms (490 at 6323ae9)
 //
 // These bounds fail if a fixed wait creeps back onto the path.
 
@@ -100,7 +101,7 @@ test('latency: Enter -> send waits under 400ms and Enter -> report under 600ms o
   assert.equal(gate.ok, true);
   assert.ok(menu.ms <= 60, `menu render poll ${menu.ms}ms`);
   assert.ok(col.ms <= 60, `collapse ${col.ms}ms (was a fixed 80ms)`);
-  assert.equal(gate.ms, 150, 'the gate keeps its one 150ms settle re-check (the Gemini focus hand-back invariant)');
+  assert.ok(gate.ms > 0 && gate.ms <= 60, `the gate keeps ONE hand-back re-check, 40-60ms with the menu's quiet time unknown (was a flat 150ms), got ${gate.ms}`);
   const toSend = menu.ms + sw.ms + col.ms + gate.ms;
   for (const arm of ['web', 'desktop']) {
     const after = loop(rows, 'after_enter_' + arm);
@@ -110,6 +111,41 @@ test('latency: Enter -> send waits under 400ms and Enter -> report under 600ms o
     t.diagnostic(`${arm}: Enter->send waits ${toSend}ms (HEAD 800ms), Enter->report ${toReport}ms (HEAD ${arm === 'web' ? 2300 : 1000}ms)`);
     assert.ok(toSend < 400, `${arm}: Enter -> send ${toSend}ms`);
     assert.ok(toReport < 600, `${arm}: Enter -> report ${toReport}ms`);
+  }
+});
+
+// 2026-10-07 (Gemini in Edge, web arm; Claude Desktop similar): "it changed the
+// model but the prompt is being sent with a lag. It needs to be sent
+// immediately after the model is changed." The wait between the switch reading
+// back and the ONE Enter, on the real loops:
+//                               HEAD 98632ab           this change
+//   web, focus on composer      collapse 40 + gate 150 = 190   40 + 50 = 90
+//   web, focus handed back      40 + refocus 120 + 150 = 310   40 + 30 + 50 = 120
+//   desktop, focus on composer  gate 150                       50
+//   desktop, focus handed back  refocus 120 + 150 = 270        30 + 50 = 80
+// (desktop runs no RouteCollapseMenu on the happy path: TryCollapsePicker, then
+// the refocus, then the gate, whose own menu check collapses only if needed.)
+test('latency: switch verified -> Enter waits <= 150ms on web and desktop, focus on the composer or handed back', winOnly, async (t) => {
+  const rows = await runHarness();
+  const col = loop(rows, 'collapse');
+  const gate = loop(rows, 'gate');
+  const ok = loop(rows, 'refocus_ok');
+  const back = loop(rows, 'refocus_handback');
+  assert.equal(ok.ok, true);
+  assert.equal(back.ok, true);
+  assert.equal(ok.ms, 0, 'focus already on the composer: the refocus does nothing');
+  assert.equal(back.focuses, 1);
+  assert.equal(back.clicks, 0, 'a SetFocus that landed is never followed by a click');
+  assert.ok(back.ms <= 40, `SetFocus -> focus seen is polled (was a flat 120ms), got ${back.ms}`);
+  const cases = {
+    web_focus_ok: col.ms + ok.ms + gate.ms,
+    web_handback: col.ms + back.ms + gate.ms,
+    desktop_focus_ok: ok.ms + gate.ms,
+    desktop_handback: back.ms + gate.ms,
+  };
+  for (const [k, v] of Object.entries(cases)) {
+    t.diagnostic(`switch verified -> Enter, ${k}: ${v}ms`);
+    assert.ok(v <= 150, `${k}: switch verified -> Enter waits ${v}ms`);
   }
 });
 

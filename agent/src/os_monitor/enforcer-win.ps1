@@ -7193,6 +7193,7 @@ public static class CfaiEnforcer
             + ",\"len\":" + len
             + (!string.IsNullOrEmpty(reason) ? ",\"reason\":\"" + Esc(reason) + "\"" : "")
             + RouteMetaFields(meta)
+            + (run != null ? RouteTimingFields(run.StartedMs, run.SwitchedMs, run.SentMs) : "")
             + "}";
         lock (_emitLock) { Console.Out.WriteLine(json); Console.Out.Flush(); }
     }
@@ -7790,7 +7791,7 @@ public static class CfaiEnforcer
             if (picker.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out patObj))
             {
                 var pat = (ExpandCollapsePattern)patObj;
-                if (pat.Current.ExpandCollapseState != ExpandCollapseState.Collapsed) pat.Collapse();
+                if (pat.Current.ExpandCollapseState != ExpandCollapseState.Collapsed) { RouteNoteDisturb(); pat.Collapse(); }
             }
         }
         catch { }
@@ -8787,7 +8788,7 @@ public static class CfaiEnforcer
         try
         {
             object p;
-            if (el.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { ((InvokePattern)p).Invoke(); return true; }
+            if (el.TryGetCurrentPattern(InvokePattern.Pattern, out p)) { RouteNoteDisturb(); ((InvokePattern)p).Invoke(); return true; }
         }
         catch { }
         return false;
@@ -8831,13 +8832,20 @@ public static class CfaiEnforcer
     }
 
     const int ROUTE_REFOCUS_MS = 800;
+    // How long one SetFocus / click is given before the next (alternating)
+    // attempt. Focus is POLLED inside it every ROUTE_REFOCUS_POLL_MS (was one
+    // flat 120ms sleep per attempt): a SetFocus that lands in a frame no longer
+    // costs the whole step, and a click is only tried once SetFocus has had
+    // the full step and still did not move focus.
     const int ROUTE_REFOCUS_STEP_MS = 120;
+    const int ROUTE_REFOCUS_POLL_MS = 30;
 
     static RouteRefocusOutcome RouteRefocusComposer(RouteRefocusIo io)
     {
         var o = new RouteRefocusOutcome();
         long deadline = io.NowMs() + ROUTE_REFOCUS_MS;
         int attempt = 0;
+        long nextActAt = long.MinValue;   // the first attempt goes immediately
         for (;;)
         {
             string ws = "other";
@@ -8856,16 +8864,23 @@ public static class CfaiEnforcer
             try { fv = io.FocusVerdict(); } catch { }
             if (string.IsNullOrEmpty(fv)) { o.Ok = true; return o; }   // "" too: a scripted delegate may yield it
             if (fv == "text_changed") { o.Reason = fv; return o; }
-            string cv = "no_element";
-            try { cv = io.CandidateVerdict(); } catch { }
-            if (!string.IsNullOrEmpty(cv)) { o.Reason = cv; return o; }
-            if (io.NowMs() >= deadline) { o.Reason = fv; return o; }
-            // SetFocus first (cheap, no pointer); then alternate with a click,
-            // which is what actually moves keyboard focus in Chromium.
-            if (attempt % 2 == 0) { o.Focuses++; try { io.FocusCandidate(); } catch { } }
-            else { o.Clicks++; try { io.ClickCandidate(); } catch { } }
-            attempt++;
-            io.Sleep(ROUTE_REFOCUS_STEP_MS);
+            long now = io.NowMs();
+            if (now >= nextActAt)
+            {
+                // About to act: the candidate must still hold exactly the prompt.
+                string cv = "no_element";
+                try { cv = io.CandidateVerdict(); } catch { }
+                if (!string.IsNullOrEmpty(cv)) { o.Reason = cv; return o; }
+                if (now >= deadline) { o.Reason = fv; return o; }
+                // SetFocus first (cheap, no pointer); then alternate with a click,
+                // which is what actually moves keyboard focus in Chromium.
+                if (attempt % 2 == 0) { o.Focuses++; try { io.FocusCandidate(); } catch { } }
+                else { o.Clicks++; try { io.ClickCandidate(); } catch { } }
+                attempt++;
+                nextActAt = io.NowMs() + ROUTE_REFOCUS_STEP_MS;
+            }
+            else if (now >= deadline) { o.Reason = fv; return o; }
+            io.Sleep(ROUTE_REFOCUS_POLL_MS);
         }
     }
 
@@ -8967,6 +8982,7 @@ public static class CfaiEnforcer
                 }
                 if (!RouteHitIsComposer(chain, rid, ancestors)) continue;
                 if (!RouteOwned()) return false;
+                RouteNoteDisturb();
                 POINT saved;
                 bool hadPos = GetCursorPos(out saved);
                 SetCursorPos(p.X, p.Y);
@@ -9022,7 +9038,7 @@ public static class CfaiEnforcer
             if (found != null) { cand = found; return null; }
             return readable ? "text_changed" : "no_element";
         };
-        io.FocusCandidate = delegate { if (!RouteOwned()) return false; try { cand.SetFocus(); return true; } catch { return false; } };
+        io.FocusCandidate = delegate { if (!RouteOwned()) return false; RouteNoteDisturb(); try { cand.SetFocus(); return true; } catch { return false; } };
         io.ClickCandidate = delegate { return RouteClickInto(cand, pinnedHwnd); };
         io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
         io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
@@ -9090,7 +9106,73 @@ public static class CfaiEnforcer
         public int Resends;            // at most 1, and only on positive evidence the Enter went to the picker
         public volatile string Stage = "start";
         public volatile bool Finished;
+        // Per-stage timing for the route event (RouteMs*): when the switch
+        // read back verified, and when the ONE send was claimed (immediately
+        // before its Enter). 0 = did not happen. RouteNowMs() clock, same as
+        // StartedMs (the moment the hook held the Enter).
+        public long SwitchedMs, SentMs;
+        // When a model menu was first seen CLOSED after the last thing that
+        // could open/close one or move focus (RouteNoteMenu / RouteNoteDisturb).
+        // 0 = not quiet (unknown). The pre-Enter gate's re-check is anchored on
+        // it -- see RouteFocusGate.
+        public long QuietFromMs;
     }
+
+    // ── Route timing + menu quiet tracking ──────────────────────────────────
+    //
+    // Route thread only; every helper is a no-op off a route thread (the
+    // watchdog's cleanup, the poll thread, the harness).
+    static void RouteNoteSwitched()
+    {
+        RouteRun r = _tsRun;
+        if (r != null && r.SwitchedMs == 0) r.SwitchedMs = RouteNowMs();
+    }
+
+    // Something that can open / close a menu or move keyboard focus just
+    // happened (an activation, Collapse(), Escape, SetFocus, a click): the
+    // focus is not "quiet" until a menu check has seen no menu again.
+    static void RouteNoteDisturb()
+    {
+        RouteRun r = _tsRun;
+        if (r != null) Interlocked.Exchange(ref r.QuietFromMs, 0);
+    }
+
+    // A model-menu observation (a real tree walk of the pinned window).
+    static void RouteNoteMenu(bool open)
+    {
+        RouteRun r = _tsRun;
+        if (r == null) return;
+        if (open) Interlocked.Exchange(ref r.QuietFromMs, 0);
+        else Interlocked.CompareExchange(ref r.QuietFromMs, RouteNowMs(), 0);
+    }
+
+    // ms since the menu was first seen closed with nothing disturbing focus
+    // since; -1 = unknown (the gate then waits its full re-check).
+    static long RouteQuietMs()
+    {
+        RouteRun r = _tsRun;
+        if (r == null) return -1;
+        long q = Interlocked.Read(ref r.QuietFromMs);
+        return q == 0 ? -1 : Math.Max(0, RouteNowMs() - q);
+    }
+
+    // Pure. The route event's stage timings, as JSON fields (leading comma),
+    // or "" when there is nothing to report. Bounded integers only:
+    //   t_switch_ms  Enter held -> the switch read back verified
+    //   t_send_ms    switch verified -> the ONE Enter claimed and sent
+    //   t_total_ms   Enter held -> the ONE Enter sent
+    // A stage that did not happen (no switch, no send) is omitted.
+    static string RouteTimingFields(long startedMs, long switchedMs, long sentMs)
+    {
+        if (startedMs <= 0) return "";
+        string s = "";
+        if (switchedMs >= startedMs) s += ",\"t_switch_ms\":" + RouteClampMs(switchedMs - startedMs);
+        if (sentMs > 0 && switchedMs > 0 && sentMs >= switchedMs) s += ",\"t_send_ms\":" + RouteClampMs(sentMs - switchedMs);
+        if (sentMs >= startedMs) s += ",\"t_total_ms\":" + RouteClampMs(sentMs - startedMs);
+        return s;
+    }
+
+    static long RouteClampMs(long ms) { return ms < 0 ? 0 : (ms > 60000 ? 60000 : ms); }
 
     const int ROUTE_CLAIM_OPEN = 0, ROUTE_CLAIM_SENDING = 1, ROUTE_CLAIM_WATCHDOG = 2;
     // The hard end-to-end bound on one route, from the swallowed Enter to the
@@ -9147,7 +9229,10 @@ public static class CfaiEnforcer
         RouteRun r = _tsRun;
         if (r == null) return true;
         r.Stage = "send";
-        return Interlocked.CompareExchange(ref r.Claim, ROUTE_CLAIM_SENDING, ROUTE_CLAIM_OPEN) == ROUTE_CLAIM_OPEN;
+        bool won = Interlocked.CompareExchange(ref r.Claim, ROUTE_CLAIM_SENDING, ROUTE_CLAIM_OPEN) == ROUTE_CLAIM_OPEN;
+        // Every caller presses its one Enter immediately after a won claim.
+        if (won) r.SentMs = RouteNowMs();
+        return won;
     }
 
     // The ONE re-send RouteAfterEnter may make, and only for a route that owns
@@ -9337,8 +9422,9 @@ public static class CfaiEnforcer
     //      which opens the menu again instead of sending.
     // So immediately before every route Enter (routed or fallback, web and
     // desktop) this gate requires: the pinned window in front, NO model menu
-    // showing, and focus on the composer holding exactly the prompt -- twice,
-    // ROUTE_GATE_SETTLE_MS apart, with the menu re-checked in between. A menu
+    // showing, and focus on the composer holding exactly the prompt -- re-read
+    // ROUTE_GATE_RECHECK_MS after the menu was first seen gone (a single read
+    // when that is already longer ago), menu re-checked with it. A menu
     // is collapsed, focus is put back (RouteClickInto now only clicks a point
     // whose hit-test IS the composer), a page dialog that took focus (a Pro
     // upsell / usage-limit notice on a free account) gets one Escape into the
@@ -9352,6 +9438,7 @@ public static class CfaiEnforcer
         public Func<bool> DialogHoldsFocus;  // a page dialog has keyboard focus
         public Action DismissDialog;         // ONE Escape into the pinned window
         public Func<string> Refocus;         // null = focus put back; else RouteRefocusComposer's reason
+        public Func<long> QuietMs;           // ms since a menu was first seen closed with nothing disturbing focus since; -1 / null = unknown
         public Action<int> Sleep;
     }
 
@@ -9360,10 +9447,40 @@ public static class CfaiEnforcer
         public bool Ok;
         public string Reason;
         public int Collapses, Refocuses, Dismissals, Checks;
+        public int WaitedMs;                 // the gate's own re-check waits (not UIA cost)
     }
 
-    const int ROUTE_GATE_SETTLE_MS = 150;
+    // THE RE-CHECK, re-anchored (2026-10-07, "it changed the model but the
+    // prompt is being sent with a lag"). It used to be a flat 150ms settle
+    // after every "looks right" read. What it guards: a menu's focus hand-back
+    // (Angular Material focuses the trigger when its menu closes; Radix
+    // returns focus from its FocusScope unmount, a setTimeout(0) later) moving
+    // focus OFF the composer after our read. Both happen no later than a tick
+    // or two after the menu leaves the page -- i.e. around when a menu check
+    // first sees it closed -- plus Chromium's accessibility serialization lag.
+    // So the second read now comes ROUTE_GATE_RECHECK_MS after the menu was
+    // first seen closed with nothing (an activation, Collapse, Escape,
+    // SetFocus, a click) disturbing focus since (RouteRun.QuietFromMs); when
+    // that is already longer ago than the re-check, the ONE read taken right
+    // after this gate's own "no menu" check is enough. Unknown = the full
+    // re-check from now. The after-Enter menu_reopened re-send stays the
+    // backstop either way.
+    const int ROUTE_GATE_RECHECK_MS = 50;
     const int ROUTE_GATE_MAX_ROUNDS = 3;
+
+    // Pure. How long the gate still waits before its confirming read.
+    static int RouteGateRecheckWaitMs(long quietMs)
+    {
+        if (quietMs < 0) return ROUTE_GATE_RECHECK_MS;
+        if (quietMs >= ROUTE_GATE_RECHECK_MS) return 0;
+        return (int)(ROUTE_GATE_RECHECK_MS - quietMs);
+    }
+
+    static long RouteGateQuiet(RouteGateIo io)
+    {
+        if (io.QuietMs == null) return -1;
+        try { return io.QuietMs(); } catch { return -1; }
+    }
 
     static string RouteGateVerdict(RouteGateIo io)
     {
@@ -9401,12 +9518,20 @@ public static class CfaiEnforcer
             string v = RouteGateVerdict(io);
             if (v == null)
             {
-                // Looks right. Let a menu's focus hand-back settle, then look again.
-                io.Sleep(ROUTE_GATE_SETTLE_MS);
+                // Looks right, and a menu check just saw no menu. A menu's
+                // focus hand-back lands no later than shortly after the menu
+                // left the page: re-read once that window has passed (see
+                // ROUTE_GATE_RECHECK_MS) -- or not at all when it already has.
+                int wait = RouteGateRecheckWaitMs(RouteGateQuiet(io));
+                if (wait <= 0) { o.Ok = true; return o; }
+                io.Sleep(wait);
+                o.WaitedMs += wait;
                 o.Checks++;
+                // Cheapest first: the window, the focused element, then the
+                // menu tree walk (all three must hold for the Enter).
                 if (!RouteSafeBool(io.WindowOk)) return RouteGateFail(io, o, "focus_changed");
-                if (RouteSafeBool(io.MenuOpen)) continue;   // something reopened it: collapse, next round
                 v = RouteGateVerdict(io);
+                if (RouteSafeBool(io.MenuOpen)) continue;   // something reopened it: collapse, next round
                 if (v == null) { o.Ok = true; return o; }
             }
             if (v == "text_changed") return RouteGateFail(io, o, v);
@@ -9642,7 +9767,9 @@ public static class CfaiEnforcer
     static bool DesktopMenuLooksOpen(AutomationElement win, RouteMeta meta)
     {
         List<string> labels = MrAllClickLabels("desktop_app", meta != null ? meta.HostOrApp : "");
-        return RouteMenuLooksOpenUia(win, MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT, "", labels);
+        bool open = RouteMenuLooksOpenUia(win, MODEL_PICKER_ITEM_CONTROL_TYPES_DEFAULT, "", labels);
+        if (win != null) RouteNoteMenu(open);   // the gate's quiet anchor
+        return open;
     }
 
     static string DesktopCollapseMenuUia(IntPtr pinnedHwnd, RouteMeta meta)
@@ -9686,6 +9813,7 @@ public static class CfaiEnforcer
             RouteRefocusUia(pinnedHwnd, pinnedRid, knownComposer, originalText, out why);
             return why;
         };
+        io.QuietMs = delegate { return RouteQuietMs(); };
         io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
         return RouteFocusGate(io);
     }
@@ -9989,6 +10117,7 @@ public static class CfaiEnforcer
             // nothing. The picker is therefore NOT collapsed until verification
             // is over. Activating the same target item twice is idempotent.
             RouteCheckpoint("select");
+            RouteNoteDisturb();
             bool usedSelect = false, usedInvoke = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
@@ -10039,6 +10168,7 @@ public static class CfaiEnforcer
             io.TierOf = delegate(string l) { return meta != null ? MrTierOfLabel(meta.Surface, meta.HostOrApp, l) : null; };
             io.RetryActivate = delegate
             {
+                RouteNoteDisturb();
                 object invObj;
                 try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
             };
@@ -10086,6 +10216,7 @@ public static class CfaiEnforcer
 
             RouteCheckpoint("await_switch");
             RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
+            if (waited.Switched) RouteNoteSwitched();   // t_switch_ms ends / t_send_ms starts HERE
             string labelAfter = waited.LabelAfter;
             TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
             if (!waited.Switched)
@@ -10216,6 +10347,12 @@ public static class CfaiEnforcer
         public Func<bool> WindowOk;        // is the pinned window still in front?
         public Action SendEscape;
         public Action<int> Sleep;
+        // The most direct method first: true when Collapse() is already known
+        // NOT to close this surface's menu (claude.ai), so its 80ms wait is
+        // skipped and the first step is the Escape. Escape's own rules are
+        // unchanged: only while the menu is seen open, only into the pinned
+        // window, at most ROUTE_COLLAPSE_MAX_ESCAPES.
+        public bool EscapeFirst;
     }
 
     class RouteCollapseOutcome
@@ -10223,6 +10360,8 @@ public static class CfaiEnforcer
         public bool Closed;
         public string Reason;              // null when Closed
         public int Escapes;
+        public bool PatternTried, PatternClosed;
+        public int WaitedMs;
     }
 
     const int ROUTE_COLLAPSE_MAX_ESCAPES = 3;
@@ -10261,7 +10400,7 @@ public static class CfaiEnforcer
         return waited;
     }
 
-    static bool RouteCollapseWaitClosed(RouteCollapseIo io, int maxMs)
+    static bool RouteCollapseWaitClosed(RouteCollapseIo io, int maxMs, RouteCollapseOutcome o)
     {
         int waited = 0;
         while (waited < maxMs)
@@ -10269,6 +10408,7 @@ public static class CfaiEnforcer
             int step = Math.Min(ROUTE_COLLAPSE_POLL_MS, maxMs - waited);
             io.Sleep(step);
             waited += step;
+            if (o != null) o.WaitedMs += step;
             bool open;
             try { open = io.MenuOpen(); } catch { open = false; }
             if (!open) return true;
@@ -10282,8 +10422,12 @@ public static class CfaiEnforcer
         bool open = false;
         try { open = io.MenuOpen(); } catch { open = false; }
         if (!open) { o.Closed = true; return o; }
-        try { io.CollapsePattern(); } catch { }
-        if (RouteCollapseWaitClosed(io, ROUTE_COLLAPSE_PATTERN_WAIT_MS)) { o.Closed = true; return o; }
+        if (!io.EscapeFirst)
+        {
+            o.PatternTried = true;
+            try { io.CollapsePattern(); } catch { }
+            if (RouteCollapseWaitClosed(io, ROUTE_COLLAPSE_PATTERN_WAIT_MS, o)) { o.Closed = true; o.PatternClosed = true; return o; }
+        }
         for (;;)
         {
             if (o.Escapes >= ROUTE_COLLAPSE_MAX_ESCAPES) { o.Reason = "menu_still_open"; return o; }
@@ -10292,7 +10436,27 @@ public static class CfaiEnforcer
             if (!winOk) { o.Reason = "focus_changed"; return o; }
             o.Escapes++;
             try { io.SendEscape(); } catch { }
-            if (RouteCollapseWaitClosed(io, ROUTE_COLLAPSE_ESCAPE_WAIT_MS)) { o.Closed = true; return o; }
+            if (RouteCollapseWaitClosed(io, ROUTE_COLLAPSE_ESCAPE_WAIT_MS, o)) { o.Closed = true; return o; }
+        }
+    }
+
+    // Per web host: did Collapse() fail to close its menu last time while an
+    // Escape did? Then the next collapse there goes Escape-first. A Collapse()
+    // that works clears it. Process-local, never persisted.
+    static readonly Dictionary<string, bool> _webCollapseEscapeFirst = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+    static bool WebCollapseEscapeFirst(string host)
+    {
+        lock (_webCollapseEscapeFirst) { bool v; return _webCollapseEscapeFirst.TryGetValue(host ?? "", out v) && v; }
+    }
+
+    static void WebCollapseLearn(string host, RouteCollapseOutcome o)
+    {
+        if (o == null || !o.Closed) return;
+        lock (_webCollapseEscapeFirst)
+        {
+            if (o.PatternClosed) _webCollapseEscapeFirst.Remove(host ?? "");
+            else if (o.PatternTried && o.Escapes > 0) _webCollapseEscapeFirst[host ?? ""] = true;
         }
     }
 
@@ -10303,7 +10467,9 @@ public static class CfaiEnforcer
     static bool WebMenuLooksOpen(AutomationElement win, WebPicker wp, List<string> itemLabels)
     {
         if (win == null || wp == null || string.IsNullOrEmpty(wp.ItemControlTypes)) return false;
-        return RouteMenuLooksOpenUia(win, wp.ItemControlTypes, wp.ItemSelectedPrefix, itemLabels);
+        bool open = RouteMenuLooksOpenUia(win, wp.ItemControlTypes, wp.ItemSelectedPrefix, itemLabels);
+        RouteNoteMenu(open);   // the gate's quiet anchor
+        return open;
     }
 
     // The UIA hands of RouteCollapseMenu for a browser. Returns null when no
@@ -10320,15 +10486,24 @@ public static class CfaiEnforcer
         io.MenuOpen = delegate { return WebMenuLooksOpen(win, wp, labels); };
         io.CollapsePattern = delegate
         {
-            AutomationElement p = FindWebPickerButton(win, wp);
+            // The picker the switch wait just re-found, when it is this
+            // window's and this host's -- no tree walk; a dead reference falls
+            // back to finding it.
+            AutomationElement p = (_webPickerCached != null && _webPickerHwnd == pinnedHwnd
+                && string.Equals(_webPickerHost ?? "", ctx.Host ?? "", StringComparison.Ordinal)) ? _webPickerCached : null;
+            bool alive = false;
+            if (p != null) { try { alive = p.Current.ControlType != null; } catch { } }
+            if (!alive) p = FindWebPickerButton(win, wp);
             if (p != null) TryCollapsePicker(p);
         };
+        io.EscapeFirst = WebCollapseEscapeFirst(ctx.Host);
         io.WindowOk = delegate { return GetForegroundWindow() == pinnedHwnd; };
         // Into the pinned BROWSER window only -- never another window, not even
         // another window of the same browser process.
         io.SendEscape = delegate { if (GetForegroundWindow() == pinnedHwnd) SendKeyPress(VK_ESCAPE); };
         io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
         RouteCollapseOutcome o = RouteCollapseMenu(io);
+        WebCollapseLearn(ctx.Host, o);
         return o.Closed ? null : (o.Reason ?? "menu_still_open");
     }
 
@@ -10459,7 +10634,7 @@ public static class CfaiEnforcer
             try { t = ReadText(cand); } catch { return "no_element"; }
             return NormalizeWs(t) == NormalizeWs(originalText) ? null : "text_changed";
         };
-        io.FocusCandidate = delegate { if (!RouteOwned()) return false; try { cand.SetFocus(); return true; } catch { return false; } };
+        io.FocusCandidate = delegate { if (!RouteOwned()) return false; RouteNoteDisturb(); try { cand.SetFocus(); return true; } catch { return false; } };
         io.ClickCandidate = delegate { return RouteClickInto(cand, pinnedHwnd); };
         io.NowMs = delegate { return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond; };
         io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
@@ -10689,6 +10864,7 @@ public static class CfaiEnforcer
             // wait is over -- collapsing right after a Select() that only
             // highlighted closes the menu having chosen nothing.
             RouteCheckpoint("select");
+            RouteNoteDisturb();
             bool usedSelect = false, usedInvoke = false;
             object selObj;
             if (targetItem.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selObj))
@@ -10743,6 +10919,7 @@ public static class CfaiEnforcer
             };
             io.RetryActivate = delegate
             {
+                RouteNoteDisturb();
                 object invObj;
                 try { if (targetItem.TryGetCurrentPattern(InvokePattern.Pattern, out invObj)) ((InvokePattern)invObj).Invoke(); } catch { }
             };
@@ -10772,6 +10949,7 @@ public static class CfaiEnforcer
 
             RouteCheckpoint("await_switch");
             RouteSwitchOutcome waited = RouteAwaitSwitch(io, confirmCfg, labels, toTier, labelBefore, usedSelect, usedInvoke);
+            if (waited.Switched) RouteNoteSwitched();   // t_switch_ms ends / t_send_ms starts HERE
             string labelAfter = waited.LabelAfter;
             TryCollapsePicker(picker);   // best-effort -- selecting usually closes it on its own
             if (!waited.Switched)
@@ -11121,6 +11299,7 @@ public static class CfaiEnforcer
             if (el != null) cand = el;
             return why;
         };
+        io.QuietMs = delegate { return RouteQuietMs(); };
         io.Sleep = delegate(int ms) { RouteCheckpoint(null); Thread.Sleep(ms); };
         return RouteFocusGate(io);
     }
@@ -21171,7 +21350,7 @@ public static class CfaiEnforcer
     // The inter-event pauses are REWRITE_KEY_DELAY_MS, not a literal, because
     // EstimateWriteMs charges a newline combination exactly three of them — see
     // that method for why the arithmetic and the sleeps must share one constant.
-    static void SendKeyPress(int vk) { SendKeyEvent(vk, false); Thread.Sleep(REWRITE_KEY_DELAY_MS); SendKeyEvent(vk, true); }
+    static void SendKeyPress(int vk) { if (vk == VK_ESCAPE) RouteNoteDisturb(); SendKeyEvent(vk, false); Thread.Sleep(REWRITE_KEY_DELAY_MS); SendKeyEvent(vk, true); }
     static void SendKeyCombo(int vkMod, int vkKey)
     {
         SendKeyEvent(vkMod, false); Thread.Sleep(REWRITE_KEY_DELAY_MS);

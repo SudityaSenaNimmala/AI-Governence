@@ -169,7 +169,8 @@ function RunGate([string]$case, [hashtable]$world) {
     now = 0; window = $true; menu = 0; escapeCloses = $true; focus = 'composer';
     handBackAfterSettle = 0;       # how many times focus jumps to the trigger right after a settle
     refocusWorks = $true; refocusOpensMenu = 0; dialog = $false; dismissCloses = $true;
-    collapses = 0; refocuses = 0; dismissals = 0; settles = 0
+    collapses = 0; refocuses = 0; dismissals = 0; settles = 0;
+    quietMs = $null                # RouteGateIo.QuietMs; $null = delegate not set (unknown)
   }
   foreach ($k in $world.Keys) { $script:G[$k] = $world[$k] }
   $io = [Activator]::CreateInstance($gIo, $true)
@@ -193,10 +194,13 @@ function RunGate([string]$case, [hashtable]$world) {
     if ($script:G.refocusWorks) { $script:G.focus = 'composer'; return $null }
     return 'focus_not_in_composer'
   }
+  if ($null -ne $script:G.quietMs) { SetDel $gIo $io 'QuietMs' { [long]$script:G.quietMs } }
   SetDel $gIo $io 'Sleep' {
     param([int]$ms)
     $script:G.now += $ms
-    if ($ms -eq 150) {
+    # The gate's re-check wait (ROUTE_GATE_RECHECK_MS, or what is left of it);
+    # 120 is the dialog-dismiss wait, not a re-check.
+    if ($ms -gt 0 -and $ms -le $script:RECHECK) {
       $script:G.settles++
       if ($script:G.handBackAfterSettle -gt 0 -and $script:G.focus -eq 'composer') { $script:G.handBackAfterSettle--; $script:G.focus = 'trigger' }
     }
@@ -208,7 +212,12 @@ function RunGate([string]$case, [hashtable]$world) {
           settles = $script:G.settles; menuOpenAtEnd = ($script:G.menu -gt 0); focusAtEnd = [string]$script:G.focus;
           elapsed = $script:G.now; enters = $(if ($ok) { 1 } else { 0 }) }
 }
+$script:RECHECK = [int](GetF 'ROUTE_GATE_RECHECK_MS')
+Emit @{ t = 'gate_const'; recheckMs = $script:RECHECK }
 RunGate 'focus_ok_stable'           @{ }
+RunGate 'quiet_single_read'         @{ quietMs = 400 }
+RunGate 'quiet_partial_wait'        @{ quietMs = 20 }
+RunGate 'quiet_handback'            @{ quietMs = 10; handBackAfterSettle = 1 }
 RunGate 'menu_left_open_closes'     @{ menu = 1; focus = 'menu'; }
 RunGate 'menu_never_closes'         @{ menu = 1; focus = 'menu'; escapeCloses = $false }
 RunGate 'material_handback'         @{ handBackAfterSettle = 1 }
@@ -219,6 +228,17 @@ RunGate 'dialog_will_not_close'     @{ focus = 'dialog'; dialog = $true; dismiss
 RunGate 'user_edited'               @{ focus = 'edited' }
 RunGate 'window_changed'            @{ window = $false; menu = 1 }
 RunGate 'focus_never_returns'       @{ focus = 'trigger'; refocusWorks = $false }
+
+# ---- 1b. the route event's stage timings (RouteTimingFields, pure) ------------
+foreach ($c in @(
+    @('routed',      1000, 1412, 1500),   # Enter held, switch verified, Enter sent
+    @('not_sent',    1000, 1412, 0),      # switched, then the gate refused: no send
+    @('unrouted',    1000, 0,    1300),   # no switch, the fallback sent
+    @('nothing',     1000, 0,    0),
+    @('runaway',     1000, 1100, 999999), # clamped to 60000
+    @('no_start',    0,    1100, 1200))) {
+  Emit @{ t = 'timing'; case = $c[0]; json = [string](Call 'RouteTimingFields' @([long]$c[1], [long]$c[2], [long]$c[3])) }
+}
 
 # ---- 2. after the ONE Enter --------------------------------------------------
 $aIo = Nested 'RouteAfterEnterIo'

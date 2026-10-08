@@ -111,3 +111,22 @@ test('model_routed keeps the send outcome code (and drops anything that is not a
   assert.equal(routingMetaFields({ send: 'unsafe_text_changed' }).send, 'unsafe_text_changed');
   assert.equal('send' in routingMetaFields({ send: 'Hello world, my SSN is…' }), false);
 });
+
+test('model_routed keeps the per-stage route timings as bounded integers (0..60000 ms), drops anything else', async () => {
+  // Desktop enforcer, 2026-10-07: "it changed the model but the prompt is being
+  // sent with a lag" -- t_switch_ms / t_send_ms / t_total_ms say where it went.
+  const ok = routingMetaFields({ t_switch_ms: 412, t_send_ms: 88, t_total_ms: 500 });
+  assert.deepEqual(ok, { t_switch_ms: 412, t_send_ms: 88, t_total_ms: 500 });
+  assert.deepEqual(routingMetaFields({ t_switch_ms: 0, t_send_ms: 60000 }), { t_switch_ms: 0, t_send_ms: 60000 });
+  for (const bad of [-1, 60001, 1.5, '120', NaN, Infinity, null, true, { $gt: 0 }, [5]]) {
+    const out = routingMetaFields({ t_switch_ms: bad, t_send_ms: bad, t_total_ms: bad });
+    assert.deepEqual(out, {}, `dropped: ${String(bad)}`);
+  }
+  await withServer(async ({ db, post }) => {
+    assert.equal((await post([{ ...V2, t_switch_ms: 300, t_send_ms: 90, t_total_ms: 390 }])).status, 201);
+    const m = JSON.parse(db._rows('dlp_events')[0].metadata_json);
+    assert.equal(m.t_switch_ms, 300);
+    assert.equal(m.t_send_ms, 90);
+    assert.equal(m.t_total_ms, 390);
+  });
+});
