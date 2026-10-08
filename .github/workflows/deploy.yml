@@ -380,6 +380,7 @@ jobs:
             mkdir -p "$DEPLOY_DIR/agent/build/electron-dist"
             cp -r .electron-build/win-unpacked "$DEPLOY_DIR/agent/build/electron-dist/"
             cp .electron-build/install.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
+            cp .electron-build/configure.ps1 "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
             cp .electron-build/uninstall.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
             cp .electron-build/uninstall-silent.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
             # Bake cfai-config.json with server URL + enroll secret from .env.

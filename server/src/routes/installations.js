@@ -482,7 +482,7 @@ export function mountInstallations(app, db) {
       join(__dirname, '..', '..', '..', 'agent', 'build', 'electron-dist'),
       join(__dirname, '..', '..', '..', 'agent', 'electron'),
     ];
-    for (const script of ['install.bat', 'uninstall.bat', 'uninstall-silent.bat']) {
+    for (const script of ['install.bat', 'configure.ps1', 'uninstall.bat', 'uninstall-silent.bat']) {
       for (const dir of scriptDirs) {
         const p = join(dir, script);
         if (existsSync(p)) { files.push({ name: script, data: readFileSync(p) }); break; }
