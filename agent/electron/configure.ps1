@@ -81,8 +81,11 @@ if (Test-Path $credsFile) {
 } | ConvertTo-Json -Compress | Set-Content (Join-Path $cfgDir 'electron-settings.json') -Encoding UTF8
 
 # Create scheduled task for THIS user
+# Use SID instead of AzureAD\Username — the AzureAD\ prefix fails silently
+# with New-ScheduledTaskPrincipal on Azure AD joined machines.
+$userSid = (New-Object System.Security.Principal.NTAccount($domainUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $short
-$principal = New-ScheduledTaskPrincipal -UserId $domainUser -LogonType Interactive -RunLevel Limited
+$principal = New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName 'CloudFuzeAIGovernance' -Action $action -Trigger $trigger -Settings $stg -Principal $principal -Force | Out-Null
 
 # Verify task was created
