@@ -228,6 +228,23 @@ jobs:
           name: electron-dist
           path: agent-package
 
+      # Bake the PUBLIC server URL into the package so the agent knows where
+      # to connect. The enrollSecret is NOT baked — the agent fetches it from
+      # the server's /api/v1/installations/info on first launch. This way no
+      # secrets need to live in GitHub.
+      - name: Bake server URL into package
+        env:
+          SERVER_URL: ${{ vars.PUBLIC_SERVER_URL || 'https://agentgovernence.cftools.live' }}
+        run: |
+          $configPath = "agent-package\win-unpacked\resources\cfai-config.json"
+          if (Test-Path (Split-Path $configPath)) {
+            $config = @{serverUrl=$env:SERVER_URL;preConfigured=$true} | ConvertTo-Json
+            Set-Content $configPath $config -Encoding UTF8
+            Write-Host "Baked cfai-config.json with server URL: $env:SERVER_URL"
+          } else {
+            Write-Host "::warning::win-unpacked/resources/ not found — skipping config bake"
+          }
+
       # Download Microsoft's official IntuneWinAppUtil
       - name: Download IntuneWinAppUtil
         run: |
@@ -360,6 +377,19 @@ jobs:
             mkdir -p "$DEPLOY_DIR/agent/build/electron-dist"
             cp -r .electron-build/win-unpacked "$DEPLOY_DIR/agent/build/electron-dist/"
             cp .electron-build/install.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
+            cp .electron-build/uninstall.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
+            cp .electron-build/uninstall-silent.bat "$DEPLOY_DIR/agent/build/electron-dist/" 2>/dev/null || true
+            # Bake cfai-config.json with server URL + enroll secret from .env.
+            # The server's desktop-app download also bakes at request time, but
+            # having it on disk means it's there from the start — no fetch needed.
+            ENROLL_SECRET=$(grep -oP '(?<=^ENROLL_SECRET=).*' "$DEPLOY_DIR/.env" 2>/dev/null || true)
+            SERVER_URL="${PUBLIC_SERVER_URL}"
+            if [ -n "$SERVER_URL" ] && [ -d "$DEPLOY_DIR/agent/build/electron-dist/win-unpacked/resources" ]; then
+              cat > "$DEPLOY_DIR/agent/build/electron-dist/win-unpacked/resources/cfai-config.json" <<CFGEOF
+{"serverUrl":"${SERVER_URL}","enrollSecret":"${ENROLL_SECRET}","preConfigured":true}
+CFGEOF
+              echo "Baked cfai-config.json with serverUrl=${SERVER_URL}"
+            fi
             echo "Electron desktop agent build shipped."
           else
             echo "::warning::Electron build artifact not found — desktop download unavailable"

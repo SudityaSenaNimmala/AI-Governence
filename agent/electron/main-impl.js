@@ -137,7 +137,20 @@ function loadSettings() {
     const raw = fs.readFileSync(SETTINGS_PATH, 'utf8');
     return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    // Fallback: read baked config from resources/ (Intune install where no user
+    // was logged in, so install.bat couldn't write electron-settings.json).
+    try {
+      const bakedPath = isDev
+        ? path.join(__dirname, '..', 'build', 'electron-dist', 'win-unpacked', 'resources', 'cfai-config.json')
+        : path.join(process.resourcesPath, 'cfai-config.json');
+      const baked = JSON.parse(fs.readFileSync(bakedPath, 'utf8'));
+      const merged = { ...DEFAULT_SETTINGS };
+      if (baked.serverUrl) merged.serverUrl = baked.serverUrl;
+      if (baked.enrollSecret) merged.enrollSecret = baked.enrollSecret;
+      return merged;
+    } catch {
+      return { ...DEFAULT_SETTINGS };
+    }
   }
 }
 
@@ -1254,10 +1267,34 @@ if (!gotLock) {
     // Auto-enroll + auto-start monitoring
     const settings = loadSettings();
     let creds = loadCredentials();
-    if (!creds?.token && settings.serverUrl && settings.enrollSecret) {
+    if (!creds?.token && settings.serverUrl) {
       (async () => {
         try {
-          const result = await enrollWithServer(settings.serverUrl, settings.enrollSecret);
+          let enrollSecret = settings.enrollSecret;
+          // If no enrollSecret in settings (Intune install without baked config),
+          // fetch it from the server. The server's /installations/info endpoint
+          // serves the enrollment credential — no secrets need to be in GitHub.
+          if (!enrollSecret && settings.serverUrl) {
+            try {
+              const infoRes = await fetch(`${settings.serverUrl.replace(/\/$/, '')}/api/v1/installations/info`, {
+                signal: AbortSignal.timeout(15000),
+              });
+              if (infoRes.ok) {
+                const info = await infoRes.json();
+                if (info.enroll_secret) {
+                  enrollSecret = info.enroll_secret;
+                  // Save so we don't fetch every launch
+                  saveSettings({ ...settings, enrollSecret });
+                  console.log('Fetched enrollment credentials from server');
+                }
+              }
+            } catch (e) { console.log('Could not fetch enrollment info:', e.message); }
+          }
+          if (!enrollSecret) {
+            console.log('No enrollment secret available — cannot auto-enroll');
+            return;
+          }
+          const result = await enrollWithServer(settings.serverUrl, enrollSecret);
           if (result?.success) {
             console.log('Auto-enrolled successfully');
             creds = loadCredentials();

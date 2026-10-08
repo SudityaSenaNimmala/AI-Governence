@@ -7,13 +7,14 @@ echo     CloudFuze Desktop Agent - Uninstall
 echo  ============================================
 echo.
 
-REM -- Stop the running agent --
+REM -- Stop the running agent and its child processes --
 echo  [..] Stopping agent...
 taskkill /IM "CloudFuze AI Governance.exe" /F >nul 2>&1
-taskkill /IM node.exe /FI "WINDOWTITLE eq CloudFuze*" /F >nul 2>&1
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -match 'monitor-runner|enforcer-watchdog' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -match 'enforcer-win' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 
 REM -- Wait for processes to exit --
-timeout /t 2 /nobreak >nul 2>&1
+timeout /t 5 /nobreak >nul 2>&1
 
 REM -- Remove auto-start entries --
 echo  [..] Removing auto-start...
@@ -41,15 +42,21 @@ if errorlevel 1 (
 )
 :SKIP_DATA
 
-REM -- Remove app directory --
+REM -- Remove app directories --
 echo.
+REM Remove the installed copy in Program Files
+if exist "C:\Program Files\CloudFuze\AI Governance" (
+    echo  [..] Removing installed application...
+    rmdir /s /q "C:\Program Files\CloudFuze\AI Governance" >nul 2>&1
+    rmdir "C:\Program Files\CloudFuze" >nul 2>&1
+    echo  [OK] Installed application removed
+)
+REM Remove the source copy next to this script
 set "APPDIR=%~dp0win-unpacked"
 if exist "%APPDIR%" (
-    echo  [..] Removing application files...
+    echo  [..] Removing source application files...
     rmdir /s /q "%APPDIR%" >nul 2>&1
-    echo  [OK] Application removed
-) else (
-    echo  [--] Application directory not found, skipping
+    echo  [OK] Source files removed
 )
 
 echo.
