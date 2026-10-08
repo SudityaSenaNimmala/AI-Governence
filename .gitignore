@@ -5,7 +5,11 @@ build/
 # Windows binaries that can't be built on the Linux deploy server.
 !agent/build/
 !agent/build/electron-dist/
-!agent/build/electron-dist/**
+!agent/build/electron-dist/install.bat
+!agent/build/electron-dist/uninstall.bat
+!agent/build/electron-dist/uninstall-silent.bat
+# electron-fresh and win-unpacked are build artifacts — never commit them.
+# Only the install/uninstall scripts are tracked.
 *.log
 .DS_Store
 Thumbs.db

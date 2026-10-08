@@ -1,5 +1,0 @@
-{
-  "preConfigured": true,
-  "serverUrl": "http://localhost:8787",
-  "enrollSecret": "dev-enroll-secret-change-me"
-}

@@ -16,17 +16,17 @@ REM -- Stop running agent and its child processes --
 taskkill /IM "CloudFuze AI Governance.exe" /F >nul 2>&1
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -match 'monitor-runner|enforcer-watchdog' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -match 'enforcer-win' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
-timeout /t 5 /nobreak >nul 2>&1
+timeout /t 3 /nobreak >nul 2>&1
 
 REM -- Remove old scheduled task --
 schtasks /Delete /TN "CloudFuzeAIGovernance" /F >nul 2>&1
 
 REM -- Copy to permanent location --
 if exist "%INSTALL_DIR%" rmdir /s /q "%INSTALL_DIR%" >nul 2>&1
-timeout /t 2 /nobreak >nul 2>&1
+timeout /t 1 /nobreak >nul 2>&1
 REM -- Retry rmdir if dir survived (AV lock, slow handle release) --
 if exist "%INSTALL_DIR%" (
-    timeout /t 3 /nobreak >nul 2>&1
+    timeout /t 2 /nobreak >nul 2>&1
     rmdir /s /q "%INSTALL_DIR%" >nul 2>&1
 )
 if exist "%INSTALL_DIR%" exit /b 1
@@ -38,8 +38,8 @@ REM -- Unblock + configure + create task (all in PowerShell for SYSTEM compat) -
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
  "Set-StrictMode -Off;" ^
  "" ^
- "# Unblock files" ^
- "Get-ChildItem 'C:\Program Files\CloudFuze\AI Governance' -Recurse -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue;" ^
+ "# Unblock the exe (recursive unblock on thousands of files causes Intune timeout)" ^
+ "Unblock-File 'C:\\Program Files\\CloudFuze\\AI Governance\\CloudFuze AI Governance.exe' -ErrorAction SilentlyContinue;" ^
  "" ^
  "# Read baked config" ^
  "$cfgFile = 'C:\\Program Files\\CloudFuze\\AI Governance\\resources\\cfai-config.json';" ^

@@ -206,6 +206,9 @@ jobs:
         run: npx electron-builder --dir --win || echo "::warning::Electron build failed — desktop download will be unavailable until fixed"
         continue-on-error: true
 
+      - name: Clean build artifacts before upload
+        run: rm -rf agent/build/electron-dist/electron-fresh agent/build/electron-dist/builder-*.yml agent/build/electron-dist/builder-*.yaml
+
       - uses: actions/upload-artifact@v4
         if: hashFiles('agent/build/electron-dist/win-unpacked/resources/app.asar') != ''
         with:
