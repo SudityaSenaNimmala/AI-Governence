@@ -75,7 +75,7 @@ app.use(express.json({ limit: '50mb' }));
 
 app.get('/api/v1/health', (req, res) => {
   res.json({
-    ok: true, service: 'ai-governance-server', version: '0.1.0', dbKind: 'mongodb',
+    ok: true, service: 'ai-governance-server', version: '0.1.0', deploy_marker: 'green', dbKind: 'mongodb',
     // Reported so an open admin surface is discoverable without reading the host's
     // .env. A temporary hole that nothing mentions is a hole nobody remembers to
     // close, and health is the one place ops already looks.
