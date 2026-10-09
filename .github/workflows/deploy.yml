@@ -389,9 +389,8 @@ jobs:
             ENROLL_SECRET=$(grep -oP '(?<=^ENROLL_SECRET=).*' "$DEPLOY_DIR/.env" 2>/dev/null || true)
             SERVER_URL="${PUBLIC_SERVER_URL}"
             if [ -n "$SERVER_URL" ] && [ -d "$DEPLOY_DIR/agent/build/electron-dist/win-unpacked/resources" ]; then
-              cat > "$DEPLOY_DIR/agent/build/electron-dist/win-unpacked/resources/cfai-config.json" <<CFGEOF
-{"serverUrl":"${SERVER_URL}","enrollSecret":"${ENROLL_SECRET}","preConfigured":true}
-CFGEOF
+              printf '{"serverUrl":"%s","enrollSecret":"%s","preConfigured":true}\n' "$SERVER_URL" "$ENROLL_SECRET" \
+                > "$DEPLOY_DIR/agent/build/electron-dist/win-unpacked/resources/cfai-config.json"
               echo "Baked cfai-config.json with serverUrl=${SERVER_URL}"
             fi
             echo "Electron desktop agent build shipped."
