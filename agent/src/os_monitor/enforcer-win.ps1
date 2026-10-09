@@ -21392,6 +21392,29 @@ public static class CfaiEnforcer
 }
 '@
 
+# ── Keep the CFAI_* payloads out of csc.exe's environment ───────────────────
+# Add-Type compiles $source by launching csc.exe, which inherits this process's
+# WHOLE environment block — and .NET refuses to start a child whose block is
+# over 65,535 bytes. enforcer.js hands this script ~60 KB of CFAI_* JSON
+# (CFAI_MODEL_ROUTER_CONFIG alone is ~34K chars, CFAI_WEB_SURFACES ~10K,
+# CFAI_BLOCK_PATTERNS grows with policy), so once block patterns arrived every
+# respawn died here with "The environment block used to start a process cannot
+# be longer than 65535 bytes" and the helper crash-looped: no blocking, no
+# routing, no Tokenize & Send.
+#
+# Every $env:CFAI_* value this script uses has already been copied into a script
+# variable above, so drop them from the process environment before compiling.
+# The only exceptions are the vars the C# side itself reads at runtime through
+# Environment.GetEnvironmentVariable (both small): agent/tests/
+# enforcer-env-block.test.mjs pins this list to exactly that set, and pins that
+# no $env:CFAI_ read comes after this point.
+$cfaiKeepForRuntime = @('CFAI_EVIDENCE_DLP', 'CFAI_ATTACH_CENSUS')
+foreach ($cfaiVar in @(Get-ChildItem -Path Env: | Where-Object { $_.Name -like 'CFAI_*' })) {
+    if ($cfaiKeepForRuntime -notcontains $cfaiVar.Name) {
+        [Environment]::SetEnvironmentVariable($cfaiVar.Name, $null, 'Process')
+    }
+}
+
 Add-Type -TypeDefinition $source -ReferencedAssemblies @(
     'System.Windows.Forms',
     'UIAutomationClient',
