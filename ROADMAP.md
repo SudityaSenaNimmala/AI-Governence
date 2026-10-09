@@ -376,6 +376,12 @@ expansion. P2 = blocks bigger deals. P3 = nice-to-have. P4 = paperwork.
 - [ ] **Live-verify model routing on ChatGPT web/desktop and Perplexity, then switch them on**
   Catalog entries are verified:false (ChatGPT labels unmeasured; some accounts have no picker); needs a live picker probe per surface before enforcing.
 
+- [ ] **Pass large enforcer config (routing policy, web surfaces) via a state file, not env vars**
+  CFAI_MODEL_ROUTER_CONFIG measured 33,755 chars with a cached policy, past Windows' 32,767-char per-variable cap; prompt-watcher.ps1 still Add-Types with ~13K of CFAI_* in env.
+
+- [ ] **Restore the AI Hub SDK Projects page**
+  `/AIHub/SDK` route exists but has no page and falls back to Overview; Test/README.md and the SDK flow point users to "AI Hub → SDK → Projects".
+
 ---
 
 ## P2 — enterprise distribution
