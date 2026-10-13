@@ -537,23 +537,6 @@ function UserCell({ row }) {
   return mid ? <Mono>{String(mid).slice(0,10)}</Mono> : <span className="aihub_text_muted">—</span>;
 }
 
-// When a row stands for more than one event, the control that reveals the rest.
-// Lives in the When cell: the Kind column it used to sit in is gone, and the
-// members it opens are all near-simultaneous, so time is where a reader looks.
-function GroupToggle({ row, open, onToggle }) {
-  const n = (row._children||[]).length;
-  // Attached enforcement events are counted separately so the "N events" figure
-  // stays the prompt-only count it always was.
-  const k = enforcementMembers(row).length;
-  if (!n && !k) return null;
-  return (
-    <button onClick={e=>{e.stopPropagation();onToggle();}}
-      style={{display:"inline-flex",alignItems:"center",gap:2,marginTop:3,padding:0,border:"none",background:"none",
-        color:"#0044cc",fontSize:11.1,fontWeight:600,cursor:"pointer"}}>
-      {n+1} {n ? "events" : "event"}{k ? ` · ${k} enforcement` : ""} {open ? <ChevronDown size={11}/> : <ChevronRight size={11}/>}
-    </button>
-  );
-}
 // The folded-away members, in the order they happened, so the sequence that
 // produced the outcome is legible: prompt → block → what the person chose.
 function GroupDetail({ row, onView }) {
@@ -1887,11 +1870,13 @@ function DLPView() {
           the "Prompt events" card above is visible rather than mysterious. */}
       <SectionHeader title="Sensitive Prompts"
         hint={`${promptGroups.length} actions from ${shownPromptEvents} events · high & critical severity only`}/>
-      <DataTable onRow={r=>{ const c=contentMember(r); if(c) setPreview(c); }}
+      {/* Row click opens the events and enforcements folded into the action;
+          the captured prompt opens only from the View button. */}
+      <DataTable onRow={r=>{ if(groupMembers(r).length>1||enforcementMembers(r).length) toggleRow(r.id); }}
         isExpanded={r=>openRows.has(r.id)}
         renderExpanded={r=><GroupDetail row={r} onView={setPreview}/>}
         columns={[
-        {label:"Date & Time",hint:"When this prompt was captured. Expand the row to see every event folded into this one user action.",render:r=><><DateTimeCell d={r.occurred_at}/><GroupToggle row={r} open={openRows.has(r.id)} onToggle={()=>toggleRow(r.id)}/></>},
+        {label:"Date & Time",hint:"When this prompt was captured. Click the row to see every event and enforcement folded into this one user action.",render:r=><DateTimeCell d={r.occurred_at}/>},
         {label:"User",hint:"The employee this event is attributed to, resolved from the machine/session that captured it.",render:r=><UserCell row={r}/>},
         {label:"Service",hint:"Which AI service this prompt or upload was sent to.",render:r=><ServiceCell row={r}/>},
         {label:"Source",hint:"Which capture mechanism recorded this — the browser extension, the desktop hook, or the OS-level monitor.",render:r=><Badge text={(r.source||"").replace(/_/g," ")} color={sourceTone[r.source]||"#9ca3af"}/>},
