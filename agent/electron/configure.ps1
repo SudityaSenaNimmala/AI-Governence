@@ -3,7 +3,7 @@
 # Runs as SYSTEM (Intune) or as admin (manual install).
 
 Set-StrictMode -Off
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'SilentlyContinue'
 
 $installDir = 'C:\Program Files\CloudFuze\AI Governance'
 $exe = Join-Path $installDir 'CloudFuze AI Governance.exe'
@@ -11,7 +11,7 @@ $exe = Join-Path $installDir 'CloudFuze AI Governance.exe'
 # Unblock the exe
 Unblock-File $exe -ErrorAction SilentlyContinue
 
-# Read baked config
+# Read baked config (serverUrl + enrollSecret baked by the server at download time)
 $cfgFile = Join-Path $installDir 'resources\cfai-config.json'
 $serverUrl = 'http://localhost:8787'
 $enrollSecret = ''
@@ -21,54 +21,10 @@ if (Test-Path $cfgFile) {
     if ($j.enrollSecret) { $enrollSecret = $j.enrollSecret }
 }
 
-# Find the logged-in user
-$domainUser = (Get-CimInstance Win32_ComputerSystem).UserName
-$action = New-ScheduledTaskAction -Execute $exe -Argument '--hidden'
-$stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-
-if (-not $domainUser) {
-    # No user logged in (Intune ESP / provisioning / login screen).
-    # Create task for ALL users so the agent starts on next logon.
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
-    Register-ScheduledTask -TaskName 'CloudFuzeAIGovernance' -Action $action -Trigger $trigger -Settings $stg -Principal $principal -Force | Out-Null
-    # Verify
-    if (-not (Get-ScheduledTask -TaskName 'CloudFuzeAIGovernance' -ErrorAction SilentlyContinue)) { exit 1 }
-    exit 0
-}
-
-$short = ($domainUser -split '\\')[-1]
-
-# Find their profile by exact username match
-$prof = (Get-CimInstance Win32_UserProfile | Where-Object {
-    (-not $_.Special) -and ($_.LocalPath -match ('\\' + [regex]::Escape($short) + '$'))
-}).LocalPath
-if (-not $prof) { $prof = "C:\Users\$short" }
-
-# Config directory
-$cfgDir = Join-Path $prof '.cloudfuze-aigov'
-New-Item -ItemType Directory -Path $cfgDir -Force -ErrorAction SilentlyContinue | Out-Null
-
-# Re-enroll if server URL changed
-$credsFile = Join-Path $cfgDir 'credentials.json'
-if (Test-Path $credsFile) {
-    try {
-        $oldUrl = (Get-Content $credsFile -Raw | ConvertFrom-Json).serverUrl
-        if ($oldUrl -and $oldUrl -ne $serverUrl) {
-            'credentials.json','blocked-agents.json','agent-version' | ForEach-Object {
-                Remove-Item (Join-Path $cfgDir $_) -Force -ErrorAction SilentlyContinue
-            }
-        }
-    } catch {}
-}
-
-# Clear stale locks
-'monitor.lock','enforcer.pid','enforcer.parent' | ForEach-Object {
-    Remove-Item (Join-Path $cfgDir $_) -Force -ErrorAction SilentlyContinue
-}
-
-# Write settings
-@{
+# Write electron-settings.json to ALL non-special user profiles so the
+# agent can auto-enroll on first launch regardless of which user logs in.
+# The current app.asar reads electron-settings.json, not cfai-config.json.
+$settings = @{
     serverUrl=$serverUrl
     enrollSecret=$enrollSecret
     autoStart=$true
@@ -78,14 +34,25 @@ if (Test-Path $credsFile) {
     monitorAttachments=$true
     monitorEnforcer=$true
     startMonitorOnLaunch=$true
-} | ConvertTo-Json -Compress | Set-Content (Join-Path $cfgDir 'electron-settings.json') -Encoding UTF8
+} | ConvertTo-Json -Compress
 
-# Create scheduled task for THIS user
-# Use SID instead of AzureAD\Username — the AzureAD\ prefix fails silently
-# with New-ScheduledTaskPrincipal on Azure AD joined machines.
-$userSid = (New-Object System.Security.Principal.NTAccount($domainUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $short
-$principal = New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
+Get-CimInstance Win32_UserProfile | Where-Object { -not $_.Special } | ForEach-Object {
+    $cfgDir = Join-Path $_.LocalPath '.cloudfuze-aigov'
+    New-Item -ItemType Directory -Path $cfgDir -Force -ErrorAction SilentlyContinue | Out-Null
+    # Clear stale locks
+    'monitor.lock','enforcer.pid','enforcer.parent' | ForEach-Object {
+        Remove-Item (Join-Path $cfgDir $_) -Force -ErrorAction SilentlyContinue
+    }
+    Set-Content (Join-Path $cfgDir 'electron-settings.json') $settings -Encoding UTF8
+}
+
+# Create scheduled task for ALL users — fires on any user logon,
+# runs as that user. Works on Azure AD, domain-joined, and local machines.
+# The Electron app's single-instance lock prevents duplicates.
+$action = New-ScheduledTaskAction -Execute $exe -Argument '--hidden'
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+$stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+$principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
 Register-ScheduledTask -TaskName 'CloudFuzeAIGovernance' -Action $action -Trigger $trigger -Settings $stg -Principal $principal -Force | Out-Null
 
 # Verify task was created
