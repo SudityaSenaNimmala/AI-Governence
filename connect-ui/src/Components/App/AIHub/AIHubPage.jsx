@@ -3355,15 +3355,22 @@ function routeToText(action){
   return parts.join(" ")||a.model||"—";
 }
 
-function MultiSelect({options,value=[],onChange,label}) {
-  return (<div style={{marginBottom:10}}>
-    {label&&<div style={{fontSize:14.7,fontWeight:600,color:"#374151",marginBottom:4}}>{label}</div>}
-    <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+// Plain-language labels for the rule form. The stored values stay the same.
+const SEVERITY_LABELS = {critical:"Critical",high:"High",moderate:"Moderate",low:"Low"};
+const COMPLEXITY_LABELS = {simple:"Simple",moderate:"Moderate",complex:"Complex"};
+const PROVIDER_LABELS = {openai:"OpenAI",anthropic:"Anthropic",google:"Google",mistral:"Mistral",perplexity:"Perplexity",microsoft:"Microsoft",huggingface:"Hugging Face"};
+const TIER_HELP = {economy:"Fastest and lowest cost",standard:"Balanced cost and quality",premium:"Most capable, highest cost"};
+
+function MultiSelect({options,value=[],onChange,label,hint,labels={}}) {
+  return (<div style={{marginBottom:12}}>
+    {label&&<div style={{fontSize:14.7,fontWeight:600,color:"#374151",marginBottom:hint?0:4}}>{label}</div>}
+    {hint&&<div style={{fontSize:13,color:"#6b7280",marginBottom:6}}>{hint}</div>}
+    <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
       {options.map(o=>{
         const sel=value.includes(o);
         return <button key={o} type="button" onClick={()=>onChange(sel?value.filter(v=>v!==o):[...value,o])}
-          style={{padding:"3px 10px",borderRadius:6,fontSize:14.1,fontWeight:600,border:"1px solid",cursor:"pointer",
-            background:sel?"#0044cc14":"#fff",color:sel?"#0052e0":"#6b7280",borderColor:sel?"#0044cc30":"#e2e5ea"}}>{o}</button>;
+          style={{padding:"4px 12px",borderRadius:6,fontSize:14.1,fontWeight:600,border:"1px solid",cursor:"pointer",
+            background:sel?"#0044cc14":"#fff",color:sel?"#0052e0":"#6b7280",borderColor:sel?"#0044cc30":"#e2e5ea"}}>{labels[o]||o}</button>;
       })}
     </div>
   </div>);
@@ -3386,6 +3393,13 @@ function RuleFormModal({rule,onSave,onClose}) {
   const [actionModel,setActionModel]=useState(rule?.action?.model||"");
   const [actionHost,setActionHost]=useState(rule?.action?.host||"");
   const [saving,setSaving]=useState(false);
+  // Technical fields live under "Advanced options". Open it straight away when
+  // editing a rule that already uses one, so nothing is hidden from the editor.
+  const [showAdvanced,setShowAdvanced]=useState(()=>{
+    const c=rule?.conditions||{}, a=rule?.action||{};
+    return !!((c.model&&c.model.length)||c.prompt_tokens_gt!=null||c.prompt_tokens_lt!=null||
+      a.effort||a.ui_name||a.model||a.host||(rule?.priority!=null&&rule.priority!==50));
+  });
   // "none" rules (observe only) need no target; everything else needs a tier or,
   // for API-proxy rules, a model.
   const actionType=rule?.action?.type||"set_tier";
@@ -3421,83 +3435,87 @@ function RuleFormModal({rule,onSave,onClose}) {
     setSaving(false);
   };
 
+  const lbl={display:"block",fontSize:14.7,fontWeight:600,color:"#374151"};
+  const inp={width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"};
+  const opt={fontWeight:400,color:"#9ca3af"};
+  const hint={fontSize:13,color:"#6b7280",marginTop:2};
+
   return (<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
-    <div style={{background:"#fff",borderRadius:14,padding:24,width:560,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.15)"}} onClick={e=>e.stopPropagation()}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+    {/* textAlign:left — the app shell sets text-align: justify, which spread every label out */}
+    <div style={{background:"#fff",borderRadius:14,padding:24,width:560,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.15)",textAlign:"left"}} onClick={e=>e.stopPropagation()}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
         <h3 style={{margin:0,fontSize:18,fontWeight:700}}>{isEdit?"Edit Rule":"Create Routing Rule"}</h3>
         <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer"}}><X size={18} color="#6b7280"/></button>
       </div>
+      <div style={{fontSize:14,color:"#6b7280",marginBottom:18}}>Automatically move matching AI requests to a cheaper or more capable model.</div>
 
-      <div style={{marginBottom:12}}>
-        <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Rule Name *</label>
-        <input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Route simple tasks to cheap model"
-          style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
-      </div>
-      <div style={{display:"flex",gap:12,marginBottom:12}}>
-        <div style={{flex:1}}>
-          <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Priority (lower = first)</label>
-          <input type="number" value={priority} onChange={e=>setPriority(e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
-        </div>
-        <div style={{flex:1,display:"flex",alignItems:"flex-end",paddingBottom:4}}>
-          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:15.2}}>
-            <input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/> Enabled
-          </label>
-        </div>
+      <div style={{marginBottom:16}}>
+        <label style={lbl}>Rule name *</label>
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Send simple questions to a low-cost model" style={inp}/>
       </div>
 
       <div style={{background:"#f5f6f8",borderRadius:10,padding:14,marginBottom:14}}>
-        <div style={{fontSize:15.2,fontWeight:700,color:"#111827",marginBottom:10}}>Conditions <span style={{fontWeight:400,color:"#9ca3af"}}>(all must match)</span></div>
-        <MultiSelect label="Data Sensitivity" options={SEVERITY_OPTIONS} value={condSensitivity} onChange={setCondSensitivity}/>
-        <MultiSelect label="Prompt Complexity" options={COMPLEXITY_OPTIONS} value={condComplexity} onChange={setCondComplexity}/>
-        <MultiSelect label="Provider" options={PROVIDER_OPTIONS} value={condProvider} onChange={setCondProvider}/>
-        <div style={{marginBottom:10}}>
-          <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Original Model (comma-separated patterns)</label>
-          <input value={condModel} onChange={e=>setCondModel(e.target.value)} placeholder="e.g. gpt-4, claude-opus"
-            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
-        </div>
-        <div style={{display:"flex",gap:12}}>
-          <div style={{flex:1}}>
-            <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Tokens &gt;</label>
-            <input type="number" value={condTokensGt} onChange={e=>setCondTokensGt(e.target.value)} placeholder="e.g. 500"
-              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
-          </div>
-          <div style={{flex:1}}>
-            <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Tokens &lt;</label>
-            <input type="number" value={condTokensLt} onChange={e=>setCondTokensLt(e.target.value)} placeholder="e.g. 200"
-              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
-          </div>
+        <div style={{fontSize:15.2,fontWeight:700,color:"#111827"}}>1. When should this rule apply?</div>
+        <div style={{...hint,marginBottom:12}}>Pick what to match. Leave a section empty to match anything.</div>
+        <MultiSelect label="Sensitive data in the prompt" options={SEVERITY_OPTIONS} labels={SEVERITY_LABELS} value={condSensitivity} onChange={setCondSensitivity}/>
+        <MultiSelect label="How hard the task is" options={COMPLEXITY_OPTIONS} labels={COMPLEXITY_LABELS} value={condComplexity} onChange={setCondComplexity}/>
+        <MultiSelect label="AI provider" options={PROVIDER_OPTIONS} labels={PROVIDER_LABELS} value={condProvider} onChange={setCondProvider}/>
+      </div>
+
+      <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginBottom:14}}>
+        <div style={{fontSize:15.2,fontWeight:700,color:"#111827"}}>2. Which model should it use?{actionType!=="none"&&!actionModel.trim()?" *":""}</div>
+        <div style={{...hint,marginBottom:10}}>Matching requests switch to this level of model.</div>
+        <div style={{display:"flex",gap:8}}>
+          {TIER_OPTIONS.map(t=>{
+            const sel=actionTier===t;
+            return <button key={t} type="button" onClick={()=>setActionTier(sel?"":t)}
+              style={{flex:1,padding:"10px 8px",borderRadius:8,border:"1px solid",cursor:"pointer",textAlign:"left",
+                background:sel?"#0044cc14":"#fff",borderColor:sel?"#0052e0":"#e2e5ea"}}>
+              <div style={{fontSize:15,fontWeight:700,color:sel?"#0052e0":"#111827"}}>{tierLabel(t)}</div>
+              <div style={{fontSize:12.5,color:"#6b7280",marginTop:2}}>{TIER_HELP[t]}</div>
+            </button>;
+          })}
         </div>
       </div>
 
-      <div style={{background:"#f0f9ff",borderRadius:10,padding:14,marginBottom:18}}>
-        <div style={{fontSize:15.2,fontWeight:700,color:"#111827",marginBottom:10}}>Action — Route To</div>
-        <div style={{display:"flex",gap:12,marginBottom:10}}>
+      <button type="button" onClick={()=>setShowAdvanced(v=>!v)}
+        style={{background:"none",border:"none",padding:0,cursor:"pointer",color:"#0052e0",fontSize:14.5,fontWeight:600,marginBottom:showAdvanced?10:16}}>
+        {showAdvanced?"▾ Hide advanced options":"▸ Advanced options"}
+      </button>
+
+      {showAdvanced&&<div style={{border:"1px solid #e5e7eb",borderRadius:10,padding:14,marginBottom:16}}>
+        <div style={{marginBottom:12}}>
+          <label style={lbl}>Priority <span style={opt}>(lower numbers are checked first)</span></label>
+          <input type="number" value={priority} onChange={e=>setPriority(e.target.value)} style={inp}/>
+        </div>
+        <div style={{marginBottom:12}}>
+          <label style={lbl}>Only for these models <span style={opt}>(comma-separated)</span></label>
+          <input value={condModel} onChange={e=>setCondModel(e.target.value)} placeholder="e.g. gpt-4, claude-opus" style={inp}/>
+        </div>
+        <div style={{display:"flex",gap:12,marginBottom:12}}>
           <div style={{flex:1}}>
-            <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Target Tier{actionType!=="none"&&!actionModel.trim()?" *":""}</label>
-            <select value={actionTier} onChange={e=>setActionTier(e.target.value)}
-              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}>
-              <option value="">—</option>
-              {TIER_OPTIONS.map(t=><option key={t} value={t}>{tierLabel(t)}</option>)}
-            </select>
+            <label style={lbl}>Prompt longer than <span style={opt}>(tokens)</span></label>
+            <input type="number" value={condTokensGt} onChange={e=>setCondTokensGt(e.target.value)} placeholder="e.g. 500" style={inp}/>
           </div>
           <div style={{flex:1}}>
-            <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Effort <span style={{fontWeight:400,color:"#9ca3af"}}>(where supported)</span></label>
-            <select value={actionEffort} onChange={e=>setActionEffort(e.target.value)}
-              style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}>
-              <option value="">Leave as is</option>
-              {EFFORT_OPTIONS.map(t=><option key={t} value={t}>{tierLabel(t)}</option>)}
-            </select>
+            <label style={lbl}>Prompt shorter than <span style={opt}>(tokens)</span></label>
+            <input type="number" value={condTokensLt} onChange={e=>setCondTokensLt(e.target.value)} placeholder="e.g. 200" style={inp}/>
           </div>
         </div>
-        <div style={{marginBottom:10}}>
-          <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Picker Label Override <span style={{fontWeight:400,color:"#9ca3af"}}>(optional — the label to click instead of the catalog's)</span></label>
-          <input value={actionLabel} onChange={e=>setActionLabel(e.target.value)} placeholder="e.g. Haiku 4.5"
-            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
+        <div style={{marginBottom:12}}>
+          <label style={lbl}>Reasoning effort <span style={opt}>(where supported)</span></label>
+          <select value={actionEffort} onChange={e=>setActionEffort(e.target.value)} style={inp}>
+            <option value="">Leave as is</option>
+            {EFFORT_OPTIONS.map(t=><option key={t} value={t}>{tierLabel(t)}</option>)}
+          </select>
         </div>
-        <div style={{marginBottom:10}}>
-          <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Target Model <span style={{fontWeight:400,color:"#9ca3af"}}>(optional, API proxy only)</span></label>
-          <input value={actionModel} onChange={e=>setActionModel(e.target.value)} placeholder="e.g. claude-haiku-4-5"
-            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
+        <div style={{marginBottom:12}}>
+          <label style={lbl}>Model name to pick in the app <span style={opt}>(optional)</span></label>
+          <input value={actionLabel} onChange={e=>setActionLabel(e.target.value)} placeholder="e.g. Haiku 4.5" style={inp}/>
+        </div>
+        <div style={{marginBottom:12}}>
+          <label style={lbl}>Exact model ID <span style={opt}>(optional, API proxy only)</span></label>
+          <input value={actionModel} onChange={e=>setActionModel(e.target.value)} placeholder="e.g. claude-haiku-4-5" style={inp}/>
           <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:6}}>
             {[...MODEL_SUGGESTIONS.anthropic.slice(0,3),...MODEL_SUGGESTIONS.openai.slice(0,3),...MODEL_SUGGESTIONS.google.slice(0,3)].map(m=>
               <button key={m} type="button" onClick={()=>setActionModel(m)}
@@ -3506,16 +3524,20 @@ function RuleFormModal({rule,onSave,onClose}) {
           </div>
         </div>
         <div>
-          <label style={{fontSize:14.7,fontWeight:600,color:"#374151"}}>Target Host <span style={{fontWeight:400,color:"#9ca3af"}}>(optional, for private endpoints)</span></label>
-          <input value={actionHost} onChange={e=>setActionHost(e.target.value)} placeholder="e.g. my-company.openai.azure.com"
-            style={{width:"100%",padding:"8px 12px",border:"1px solid #e5e7eb",borderRadius:8,fontSize:15.2,marginTop:4,boxSizing:"border-box"}}/>
+          <label style={lbl}>Private endpoint host <span style={opt}>(optional)</span></label>
+          <input value={actionHost} onChange={e=>setActionHost(e.target.value)} placeholder="e.g. my-company.openai.azure.com" style={inp}/>
         </div>
-      </div>
+      </div>}
 
-      <div style={{display:"flex",justifyContent:"flex-end",gap:10}}>
-        <button onClick={onClose} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:15.2}}>Cancel</button>
-        <button onClick={handleSave} disabled={saving||!canSave}
-          style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:15.2,fontWeight:600,opacity:saving||!canSave?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10}}>
+        <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:15.2,color:"#374151"}}>
+          <input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/> Turn this rule on
+        </label>
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={onClose} style={{padding:"8px 20px",borderRadius:8,border:"1px solid #e5e7eb",background:"#fff",cursor:"pointer",fontSize:15.2}}>Cancel</button>
+          <button onClick={handleSave} disabled={saving||!canSave}
+            style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#0052e0",color:"#fff",cursor:"pointer",fontSize:15.2,fontWeight:600,opacity:saving||!canSave?0.5:1}}>{saving?"Saving...":isEdit?"Save Changes":"Create Rule"}</button>
+        </div>
       </div>
     </div>
   </div>);
